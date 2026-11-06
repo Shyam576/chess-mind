@@ -3097,13 +3097,15 @@ git commit -m "feat: wire server entrypoint, config, Dockerfile, and full backen
 
 The `web/` directory does not exist yet — run the scaffolding tool from the repo root so it creates `web/` itself; do not `cd web` first.
 
-Run:
+Run (`CI=1` forces the CLI to use its recommended defaults for anything not explicitly flagged, instead of prompting interactively — there is no TTY in this environment to answer a prompt):
 ```bash
-npx --yes create-next-app@14 web --typescript --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm
+CI=1 npx --yes create-next-app@14 web --typescript --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm
 cd web
 npm install @tanstack/react-query chess.js react-chessboard
 npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react
 ```
+
+If the command still appears to hang waiting for input despite `CI=1`, it is prompting for something not covered by the flags above — check the printed prompt text, answer it once to see what option it needs, then add the matching flag (or its `--no-` negation) to this command for next time and report what was missing.
 
 - [ ] **Step 2: Write `web/lib/api-client.ts`**
 
