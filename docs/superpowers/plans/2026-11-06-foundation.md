@@ -4031,8 +4031,14 @@ export default function GamesHistoryPage() {
 
   useEffect(() => {
     apiFetch<GameResponse[]>(`/api/games?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`)
-      .then(setGames)
-      .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load game history."));
+      .then((data) => {
+        setError(null);
+        setGames(data);
+      })
+      .catch((err) => {
+        setGames([]);
+        setError(err instanceof ApiError ? err.message : "Could not load game history.");
+      });
   }, [page]);
 
   return (
