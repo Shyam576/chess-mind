@@ -118,8 +118,11 @@ git commit -m "chore: scaffold repo with env template and postgres compose servi
 
 - [ ] **Step 1: Initialize the Go module**
 
+The `api/` directory does not exist yet — create it before `cd`-ing into it.
+
 Run:
 ```bash
+mkdir -p api
 cd api
 go mod init github.com/Shyam576/chess-mind/api
 go get github.com/pressly/goose/v3@v3.21.1
@@ -2973,10 +2976,12 @@ git commit -m "feat: wire server entrypoint, config, Dockerfile, and full backen
 
 - [ ] **Step 1: Scaffold the Next.js app**
 
+The `web/` directory does not exist yet — run the scaffolding tool from the repo root so it creates `web/` itself; do not `cd web` first.
+
 Run:
 ```bash
+npx --yes create-next-app@14 web --typescript --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm
 cd web
-npm create next-app@14 . -- --typescript --tailwind --eslint --app --src-dir=false --import-alias "@/*" --no-use-npm-workspaces
 npm install @tanstack/react-query chess.js react-chessboard
 npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react
 ```
@@ -3563,11 +3568,14 @@ git commit -m "feat: add new game setup page with color and difficulty selection
 - Create: `web/app/game/[id]/page.tsx`
 - Create: `web/components/chessboard/GameBoard.tsx`
 - Create: `web/components/chessboard/MoveHistory.tsx`
+- Create: `web/components/chessboard/PromotionDialog.tsx`
 - Test: `web/components/chessboard/GameBoard.test.tsx`
 
 **Interfaces:**
 - Consumes: `apiFetch`, `GameResponse`, `MoveResponse`, `GameWithMoves` (Tasks 12, 14); `chess.js`, `react-chessboard`.
 - Produces: the primary gameplay surface — this is the component exercised by the Task 17 E2E test.
+
+**Note on promotion:** `react-chessboard`'s own promotion-piece-code format varies across versions/forks and is not safe to guess. Promotion is instead detected locally with `chess.js` (`probe.moves({ square, verbose: true })`, checking the matching move's `promotion` field) and resolved with our own `PromotionDialog` component — never by parsing `react-chessboard`'s `onPieceDrop` piece argument.
 
 - [ ] **Step 1: Write `web/components/chessboard/MoveHistory.tsx`**
 
@@ -3599,7 +3607,54 @@ export function MoveHistory({ moves }: { moves: MoveResponse[] }) {
 }
 ```
 
-- [ ] **Step 2: Write `web/components/chessboard/GameBoard.tsx`**
+- [ ] **Step 2: Write `web/components/chessboard/PromotionDialog.tsx`**
+
+```tsx
+type PromotionPiece = "q" | "r" | "b" | "n";
+
+const PIECES: { value: PromotionPiece; label: string }[] = [
+  { value: "q", label: "Queen" },
+  { value: "r", label: "Rook" },
+  { value: "b", label: "Bishop" },
+  { value: "n", label: "Knight" },
+];
+
+export function PromotionDialog({
+  onSelect,
+  onCancel,
+}: {
+  onSelect: (piece: PromotionPiece) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="dialog"
+      aria-label="Choose promotion piece"
+    >
+      <div className="flex gap-2 rounded bg-white p-4 shadow-lg dark:bg-neutral-900">
+        {PIECES.map((p) => (
+          <button
+            key={p.value}
+            onClick={() => onSelect(p.value)}
+            className="rounded border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          onClick={onCancel}
+          className="rounded border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 3: Write `web/components/chessboard/GameBoard.tsx`**
 
 ```tsx
 "use client";
@@ -3610,35 +3665,29 @@ import { Chessboard } from "react-chessboard";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import type { GameResponse, GameWithMoves, MoveResponse } from "@/lib/types";
 import { MoveHistory } from "./MoveHistory";
+import { PromotionDialog } from "./PromotionDialog";
+
+type PendingPromotion = { from: string; to: string };
 
 export function GameBoard({ initial }: { initial: GameWithMoves }) {
   const [game, setGame] = useState<GameResponse>(initial.game);
   const [moves, setMoves] = useState<MoveResponse[]>(initial.moves);
   const [error, setError] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
+  const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
 
   const chessInstance = useMemo(() => new Chess(game.current_fen), [game.current_fen]);
   const isGameOver = game.status !== "in_progress";
 
-  async function onDrop(sourceSquare: string, targetSquare: string, piece: string) {
+  async function submitMove(from: string, to: string, promotion: string) {
     setError(null);
-    const promotion = piece.length > 1 && piece.toLowerCase().endsWith("p") === false
-      ? piece[1].toLowerCase()
-      : "";
-
-    const probe = new Chess(game.current_fen);
-    const legal = probe.move({ from: sourceSquare, to: targetSquare, promotion: promotion || "q" });
-    if (!legal) {
-      return false;
-    }
-
     setThinking(true);
     try {
       const resp = await apiFetch<{ game: GameResponse; moves: MoveResponse[] }>(
         `/api/games/${game.id}/moves`,
         {
           method: "POST",
-          body: JSON.stringify({ from: sourceSquare, to: targetSquare, promotion }),
+          body: JSON.stringify({ from, to, promotion }),
         }
       );
       setGame(resp.game);
@@ -3650,6 +3699,34 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
     } finally {
       setThinking(false);
     }
+  }
+
+  function onDrop(sourceSquare: string, targetSquare: string) {
+    // chess.js is used here only to detect whether this is a promotion move
+    // (it has its own verbose move list); the backend independently
+    // re-validates and is authoritative for legality.
+    const probe = new Chess(game.current_fen);
+    const candidates = probe.moves({ square: sourceSquare, verbose: true }) as {
+      to: string;
+      promotion?: string;
+    }[];
+    const match = candidates.find((m) => m.to === targetSquare);
+    if (!match) {
+      return false;
+    }
+    if (match.promotion) {
+      setPendingPromotion({ from: sourceSquare, to: targetSquare });
+      return false;
+    }
+    void submitMove(sourceSquare, targetSquare, "");
+    return true;
+  }
+
+  function choosePromotion(piece: "q" | "r" | "b" | "n") {
+    if (!pendingPromotion) return;
+    const { from, to } = pendingPromotion;
+    setPendingPromotion(null);
+    void submitMove(from, to, piece);
   }
 
   async function resign() {
@@ -3670,6 +3747,9 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
           boardOrientation={game.player_color}
           arePiecesDraggable={!isGameOver}
         />
+        {pendingPromotion && (
+          <PromotionDialog onSelect={choosePromotion} onCancel={() => setPendingPromotion(null)} />
+        )}
         {thinking && <p className="mt-2 text-sm text-neutral-500">Stockfish is thinking…</p>}
         {error && (
           <p role="alert" className="mt-2 text-sm text-red-600">
@@ -3699,7 +3779,7 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
 }
 ```
 
-- [ ] **Step 3: Write `web/app/game/[id]/page.tsx`** (server component fetching initial state; note: the backend session cookie must be forwarded for this server-side fetch, so this page fetches client-side instead to reuse the browser's cookie jar)
+- [ ] **Step 4: Write `web/app/game/[id]/page.tsx`** (server component fetching initial state; note: the backend session cookie must be forwarded for this server-side fetch, so this page fetches client-side instead to reuse the browser's cookie jar)
 
 ```tsx
 "use client";
@@ -3735,7 +3815,7 @@ export default function GamePage() {
 }
 ```
 
-- [ ] **Step 4: Write failing test `web/components/chessboard/GameBoard.test.tsx`**
+- [ ] **Step 5: Write failing test `web/components/chessboard/GameBoard.test.tsx`**
 
 ```tsx
 import { render, screen } from "@testing-library/react";
@@ -3781,12 +3861,12 @@ describe("GameBoard", () => {
 });
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 6: Run tests**
 
 Run: `cd web && npm test`
 Expected: both `GameBoard` tests PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add web
@@ -4057,11 +4137,11 @@ npx playwright test   # end-to-end golden path (requires the full stack running)
 
 - [ ] **Step 2: Full-stack final verification**
 
-Run:
+Run (sequentially, in one shell so each `cd` carries into the next line):
 ```bash
 cd api && go build ./... && go test ./...
 cd ../web && npm run build && npm test
-docker compose up -d --build
+cd .. && docker compose up -d --build
 curl -s http://localhost:8080/healthz
 cd web && npx playwright test
 ```
