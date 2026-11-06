@@ -4103,9 +4103,13 @@ git commit -m "feat: add paginated game history page"
 - Modify: `docker-compose.yml` (add `web` service)
 - Create: `web/playwright.config.ts`
 - Create: `web/e2e/golden-path.spec.ts`
+- Create: `web/public/.gitkeep` (see Step 4a)
+- Modify: `api/internal/httpapi/middleware.go`, `api/internal/httpapi/router.go` (add CORS support, see Step 4b)
 
 **Interfaces:**
 - Consumes: the full stack from Tasks 1–16.
+
+**Note on scope:** this task discovers two things that only become visible once a real browser makes cross-origin, credentialed requests against the live stack — something no earlier task's testing (Go `httptest`, `curl`, Vitest component tests) could surface, since none of those go through an actual browser's CORS enforcement. Steps 4a and 4b fix both; they are not optional polish — the golden-path E2E test cannot pass without them.
 
 - [ ] **Step 1: Write `web/Dockerfile`**
 
@@ -4200,6 +4204,80 @@ test("register, play a game to resignation, see it in history", async ({ page })
 });
 ```
 
+- [ ] **Step 4a: Ensure `web/public/` exists**
+
+The Dockerfile's `COPY --from=build /app/public ./public` requires a `public/` directory to exist in the build stage, even if empty (a missing source path fails a Docker `COPY`). If `create-next-app`'s scaffold in Task 12 didn't produce one in this repo, add a placeholder so it's tracked by git (git does not track empty directories):
+
+Run: `mkdir -p web/public && touch web/public/.gitkeep`
+
+- [ ] **Step 4b: Add CORS support to the Go API**
+
+The frontend (`http://localhost:3001`) and the API (`http://localhost:8081`) are different origins. The frontend's `apiFetch` already sends `credentials: "include"` (Task 12) for cookie-based auth, so the browser requires the API to explicitly allow that origin via CORS — including answering the preflight `OPTIONS` request the browser sends before the real one. Without this, every authenticated request from a real browser fails (confirmed via `docker compose logs api`: a bare 405 from chi on the preflight). This is invisible to `curl`, Go's `httptest`, and Vitest component tests, since none of them are a real browser enforcing CORS.
+
+Add to `api/internal/httpapi/middleware.go` (alongside the existing `requireAuth`/`recoverMiddleware`):
+
+```go
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"runtime/debug"
+	"strings"
+
+	"github.com/Shyam576/chess-mind/api/internal/auth"
+)
+```
+
+(add `"os"` to the existing import block)
+
+```go
+// corsAllowedOrigin returns the single origin the API accepts cross-origin
+// requests from. The frontend is a separate origin (its own Docker service
+// and host port) from the API, and the browser enforces CORS for the
+// cookie-authenticated requests it makes, so the API must explicitly allow
+// that origin. Defaults to the frontend's local dev/compose origin; override
+// with CORS_ALLOWED_ORIGIN for other environments.
+func corsAllowedOrigin() string {
+	if v := os.Getenv("CORS_ALLOWED_ORIGIN"); v != "" {
+		return v
+	}
+	return "http://localhost:3001"
+}
+
+// corsMiddleware allows the configured frontend origin to make
+// credentialed (cookie-based) cross-origin requests to the API, and answers
+// the browser's CORS preflight (OPTIONS) requests that precede them. Only
+// an exact-matching origin is ever echoed back (never "*"), since
+// Access-Control-Allow-Credentials forbids a wildcard origin.
+func corsMiddleware(next http.Handler) http.Handler {
+	allowedOrigin := corsAllowedOrigin()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && origin == allowedOrigin {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+```
+
+In `api/internal/httpapi/router.go`, register it alongside the other global middleware, **before** any route is registered, so it wraps every request including preflight `OPTIONS` to protected routes (which must never reach `requireAuth`, since a preflight carries no credentials):
+
+```go
+	r.Use(middleware.Logger)
+	r.Use(recoverMiddleware)
+	r.Use(corsMiddleware)
+```
+
 - [ ] **Step 5: Run the full stack and the E2E test**
 
 Run:
@@ -4212,7 +4290,7 @@ Expected: the `golden-path` test PASSES against the live backend started via Doc
 - [ ] **Step 6: Commit**
 
 ```bash
-git add web/Dockerfile docker-compose.yml web/playwright.config.ts web/e2e web/package.json web/package-lock.json
+git add web/Dockerfile docker-compose.yml web/playwright.config.ts web/e2e web/package.json web/package-lock.json web/public api/internal/httpapi/middleware.go api/internal/httpapi/router.go
 git commit -m "feat: add frontend Dockerfile, full compose stack, and golden-path E2E test"
 ```
 
