@@ -4115,6 +4115,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:20-bookworm-slim
@@ -4127,18 +4129,23 @@ EXPOSE 3000
 CMD ["npm", "run", "start"]
 ```
 
+`NEXT_PUBLIC_API_URL` must be passed as a build `ARG`, not a container-runtime `environment:` variable: Next.js inlines every `NEXT_PUBLIC_*` reference into the client-side bundle during `next build` (the first stage, which runs during `docker build`, before any `docker-compose.yml` runtime environment ever exists) — setting it only at container runtime has no effect on an already-built bundle.
+
 - [ ] **Step 2: Add the `web` service to `docker-compose.yml`**
 
 ```yaml
   web:
-    build: ./web
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8081
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8081
     ports:
-      - "3000:3000"
+      - "3001:3000"
     depends_on:
       - api
 ```
+
+Host port `3001` (not `3000`) is used because `3000` may already be bound by an unrelated process on the development machine — the container still listens on `3000` internally. Same pattern as the Postgres and API host-port remaps in Tasks 1 and 11.
 
 (Append under the existing `services:` key alongside `postgres` and `api` from Task 11.)
 
@@ -4152,10 +4159,10 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  use: { baseURL: "http://localhost:3000" },
+  use: { baseURL: "http://localhost:3001" },
   webServer: {
-    command: "npm run dev",
-    url: "http://localhost:3000",
+    command: "npm run dev -- -p 3001",
+    url: "http://localhost:3001",
     reuseExistingServer: true,
     timeout: 30_000,
   },
@@ -4233,7 +4240,7 @@ A chess application: play against an adjustable Stockfish opponent, with the Go 
 
 1. Copy `.env.example` to `.env` and adjust if needed.
 2. `docker compose up -d --build` — starts Postgres, the Go API (migrations run automatically on boot), and the Next.js frontend.
-3. Visit `http://localhost:3000`.
+3. Visit `http://localhost:3001`.
 
 ## Running tests
 
