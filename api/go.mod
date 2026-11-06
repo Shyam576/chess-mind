@@ -1,6 +1,6 @@
 module github.com/Shyam576/chess-mind/api
 
-go 1.26.5
+go 1.23
 
 require (
 	github.com/mfridman/interpolate v0.0.2 // indirect
