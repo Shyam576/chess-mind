@@ -57,12 +57,12 @@
 - [ ] **Step 2: Write `.env.example`**
 
 ```bash
-DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 JWT_SECRET=dev-secret-change-me
 PORT=8080
 STOCKFISH_PATH=/usr/games/stockfish
 STOCKFISH_POOL_SIZE=4
-NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_API_URL=http://localhost:8081
 ```
 
 - [ ] **Step 3: Write `docker-compose.yml` (postgres only for now; `api`/`web` added in later tasks)**
@@ -77,7 +77,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -89,6 +89,8 @@ services:
 volumes:
   pgdata:
 ```
+
+Host port `5434` (not the default `5432`) is used because `5432` and `5433` may already be bound by other Postgres instances on the development machine; the container still listens on `5432` internally, so container-to-container traffic (the `api` service's `DATABASE_URL`, added in Task 11) is unaffected. The mapping is bound to `127.0.0.1` only (not `0.0.0.0`) so this dev database with well-known credentials isn't reachable from the LAN.
 
 - [ ] **Step 4: Verify Postgres starts**
 
@@ -118,8 +120,11 @@ git commit -m "chore: scaffold repo with env template and postgres compose servi
 
 - [ ] **Step 1: Initialize the Go module**
 
+The `api/` directory does not exist yet — create it before `cd`-ing into it.
+
 Run:
 ```bash
+mkdir -p api
 cd api
 go mod init github.com/Shyam576/chess-mind/api
 go get github.com/pressly/goose/v3@v3.21.1
@@ -211,7 +216,7 @@ Run:
 ```bash
 cd api
 go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
-export DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+export DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 make migrate-up
 docker compose exec postgres psql -U chessmind -d chessmind -c '\dt'
 ```
@@ -449,16 +454,14 @@ func TestApplyMove_EnPassant(t *testing.T) {
 }
 
 func TestApplyMove_Promotion(t *testing.T) {
-	// Build a position where white can promote: clear the board down to a pawn on the 7th rank
-	// via a long forced sequence is brittle; instead verify promotion string plumbing using
-	// notnil/chess's own UCI decode on a reachable promotion position reached from a few plies.
+	// Advance a white pawn to a7 while keeping it alive (no piece ever captures it),
+	// and clear a8 so the promotion is a clean non-capturing advance.
 	prior := []string{}
 	setup := [][3]string{
 		{"a2", "a4", ""}, {"b7", "b5", ""},
 		{"a4", "b5", ""}, {"a7", "a6", ""},
-		{"b5", "a6", ""}, {"b8", "a6", ""},
-		{"a1", "a6", ""}, {"c7", "c6", ""},
-		{"a6", "a7", ""}, {"d7", "d6", ""},
+		{"b5", "a6", ""}, {"b8", "c6", ""},
+		{"a6", "a7", ""}, {"a8", "b8", ""},
 	}
 	for _, m := range setup {
 		res, err := ApplyMove(prior, m[0], m[1], m[2])
@@ -669,8 +672,7 @@ package stockfish
 
 import (
 	"context"
-	"os/exec"
-	"strings"
+	"os"
 	"testing"
 	"time"
 )
@@ -691,18 +693,10 @@ func writeFakeEngine(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := dir + "/fake-engine.sh"
-	if err := exec.Command("sh", "-c", "cat > "+path).Run(); err != nil {
-		t.Skip("sh not available to build fake engine script")
-	}
-	f, err := exec.Command("sh", "-c", "printf '%s' "+quote(fakeEngineScript)+" > "+path+" && chmod +x "+path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to write fake engine: %v (%s)", err, f)
+	if err := os.WriteFile(path, []byte(fakeEngineScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake engine: %v", err)
 	}
 	return path
-}
-
-func quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func TestPool_BestMove(t *testing.T) {
@@ -740,6 +734,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -747,10 +742,11 @@ import (
 )
 
 type process struct {
-	cmd    *exec.Cmd
-	stdin  *bufio.Writer
-	stdout *bufio.Scanner
-	mu     sync.Mutex
+	cmd       *exec.Cmd
+	stdinPipe io.WriteCloser
+	stdin     *bufio.Writer
+	stdout    *bufio.Scanner
+	mu        sync.Mutex
 }
 
 func startProcess(binaryPath string) (*process, error) {
@@ -767,9 +763,10 @@ func startProcess(binaryPath string) (*process, error) {
 		return nil, err
 	}
 	p := &process{
-		cmd:    cmd,
-		stdin:  bufio.NewWriter(stdin),
-		stdout: bufio.NewScanner(stdout),
+		cmd:       cmd,
+		stdinPipe: stdin,
+		stdin:     bufio.NewWriter(stdin),
+		stdout:    bufio.NewScanner(stdout),
 	}
 	if err := p.send("uci"); err != nil {
 		return nil, err
@@ -850,6 +847,9 @@ func (p *process) bestMove(ctx context.Context, movesUCI []string, skillLevel in
 
 func (p *process) close() error {
 	_ = p.send("quit")
+	// Closing stdin ends the engine's input loop even if it ignores "quit";
+	// without this, cmd.Wait would block forever on such an engine.
+	_ = p.stdinPipe.Close()
 	return p.cmd.Wait()
 }
 
@@ -888,6 +888,8 @@ func (p *Pool) BestMove(ctx context.Context, movesUCI []string, skillLevel int, 
 		fresh, startErr := startProcess(p.binaryPath)
 		if startErr == nil {
 			p.procs <- fresh
+		} else {
+			err = fmt.Errorf("%w (pool worker respawn also failed: %v)", err, startErr)
 		}
 		return "", err
 	}
@@ -895,6 +897,9 @@ func (p *Pool) BestMove(ctx context.Context, movesUCI []string, skillLevel int, 
 	return move, nil
 }
 
+// Close shuts down every pooled engine process. It must not be called
+// concurrently with BestMove; callers should ensure in-flight requests
+// have completed first (see Task 11's shutdown ordering).
 func (p *Pool) Close() error {
 	close(p.procs)
 	for proc := range p.procs {
@@ -1203,7 +1208,7 @@ git commit -m "feat: add auth domain with bcrypt hashing, JWT issuing, and regis
   - `type Color string` with `ColorWhite`, `ColorBlack`.
   - `type Game struct { ID, UserID string; Status Status; PlayerColor Color; Difficulty int; CurrentFEN string; Result *string; CreatedAt, UpdatedAt time.Time }`
   - `type Move struct { ID, GameID string; PlyNumber int; MoveSAN, MoveUCI, FENAfter string; CreatedAt time.Time }`
-  - `type Repository interface { CreateGame, GetGame, ListGamesByUser, ListMoves, AppendMove, UpdateGameState }` (exact signatures below)
+  - `type Repository interface { CreateGame, GetGame, ListGamesByUser, ListMoves, AppendMoveAndUpdateState, UpdateGameState }` (exact signatures below). `AppendMoveAndUpdateState` persists a move and the game's resulting state together (atomically, in the real Postgres implementation) so a move is never recorded without its corresponding game-state update — see the project's transaction rules. `UpdateGameState` alone remains for single-table updates (resignation).
   - `var ErrNotFound, ErrForbidden, ErrNotYourTurn, ErrGameFinished error`
   - `type MoveRequest struct { From, To, Promotion string }`
   - `type Service struct{...}`, `func NewService(repo Repository, engine stockfish.Engine) *Service`
@@ -1274,7 +1279,10 @@ type Repository interface {
 	GetGame(ctx context.Context, id string) (*Game, error)
 	ListGamesByUser(ctx context.Context, userID string, limit, offset int) ([]*Game, error)
 	ListMoves(ctx context.Context, gameID string) ([]*Move, error)
-	AppendMove(ctx context.Context, m *Move) error
+	// AppendMoveAndUpdateState atomically records a move and the game's
+	// resulting state together, so a move is never persisted without its
+	// corresponding game-state update (or vice versa) if either write fails.
+	AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error
 	UpdateGameState(ctx context.Context, id string, fen string, status Status, result *string) error
 }
 ```
@@ -1346,8 +1354,12 @@ func (r *memRepo) ListMoves(ctx context.Context, gameID string) ([]*Move, error)
 	return r.moves[gameID], nil
 }
 
-func (r *memRepo) AppendMove(ctx context.Context, m *Move) error {
+func (r *memRepo) AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error {
 	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
 	return nil
 }
 
@@ -1387,10 +1399,15 @@ func TestSubmitMove_WrongTurn(t *testing.T) {
 	repo := newMemRepo()
 	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
 	ctx := context.Background()
-	g, err := svc.CreateGame(ctx, "user-1", ColorBlack, 5)
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
 	require.NoError(t, err)
 
-	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	// Simulate an out-of-band move (e.g. a concurrent request) so the
+	// recorded ply count says it is Black's turn, even though the
+	// registered player for this game is White.
+	require.NoError(t, repo.AppendMoveAndUpdateState(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}, g.CurrentFEN, StatusInProgress, nil))
+
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
 	assert.ErrorIs(t, err, ErrNotYourTurn)
 }
 
@@ -1444,6 +1461,7 @@ package game
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -1476,7 +1494,7 @@ func (s *Service) CreateGame(ctx context.Context, userID string, color Color, di
 		return nil, err
 	}
 	if color == ColorBlack {
-		if _, _, err := s.playBotMove(ctx, g, nil); err != nil {
+		if _, err := s.playBotMove(ctx, g, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -1558,12 +1576,8 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, playerMove); err != nil {
-		return nil, nil, err
-	}
-
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, gameID, result.FEN, newStatus, result.Result); err != nil {
+	if err := s.repo.AppendMoveAndUpdateState(ctx, playerMove, result.FEN, newStatus, result.Result); err != nil {
 		return nil, nil, err
 	}
 	g.CurrentFEN = result.FEN
@@ -1572,28 +1586,31 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 
 	newMoves := []*Move{playerMove}
 	if g.Status == StatusInProgress {
-		botMove, moves, err := s.playBotMove(ctx, g, append(prior, result.UCI))
+		botMove, err := s.playBotMove(ctx, g, append(prior, result.UCI))
 		if err != nil {
 			return nil, nil, err
 		}
 		if botMove != nil {
 			newMoves = append(newMoves, botMove)
 		}
-		_ = moves
 	}
 
 	return g, newMoves, nil
 }
 
-// playBotMove asks the engine for a move in the current position (priorUCI) and
-// applies it, mutating g in place and persisting the move and updated game state.
-// priorUCI is nil when the bot must play first (player chose black).
-func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, []string, error) {
+// playBotMove asks the engine for a move in the current position (priorUCI),
+// applies it, and atomically persists the move together with the resulting
+// game state. It mutates g in place to reflect the new state. priorUCI is nil
+// when the bot must play first (player chose black).
+func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, error) {
 	skillLevel := g.Difficulty
 	moveTime := 500 * time.Millisecond
 	best, err := s.engine.BestMove(ctx, priorUCI, skillLevel, moveTime)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	if len(best) < 4 {
+		return nil, fmt.Errorf("engine returned malformed move: %q", best)
 	}
 
 	from, to, promotion := best[0:2], best[2:4], ""
@@ -1603,12 +1620,12 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 
 	result, err := chessrules.ApplyMove(priorUCI, from, to, promotion)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	existing, err := s.repo.ListMoves(ctx, g.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	botMove := &Move{
@@ -1620,19 +1637,16 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, botMove); err != nil {
-		return nil, nil, err
-	}
 
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, g.ID, result.FEN, newStatus, result.Result); err != nil {
-		return nil, nil, err
+	if err := s.repo.AppendMoveAndUpdateState(ctx, botMove, result.FEN, newStatus, result.Result); err != nil {
+		return nil, err
 	}
 	g.CurrentFEN = result.FEN
 	g.Status = newStatus
 	g.Result = result.Result
 
-	return botMove, append(priorUCI, result.UCI), nil
+	return botMove, nil
 }
 
 func (s *Service) Resign(ctx context.Context, userID, gameID string) (*Game, error) {
@@ -1681,11 +1695,11 @@ git commit -m "feat: add game domain service orchestrating chess rules, Stockfis
 
 **Interfaces:**
 - Consumes: `sqlcgen.Queries` (Task 3), `auth.UserRepository`, `game.Repository` (Tasks 6, 7).
-- Produces: `func NewUserRepository(q *sqlcgen.Queries) auth.UserRepository`, `func NewGameRepository(q *sqlcgen.Queries) game.Repository`.
+- Produces: `func NewUserRepository(q *sqlcgen.Queries) auth.UserRepository`, `func NewGameRepository(pool *pgxpool.Pool) game.Repository`. `NewGameRepository` takes the pool directly (not a pre-bound `*sqlcgen.Queries`) because `AppendMoveAndUpdateState` needs to start its own transaction — `game.Repository`'s move-write path must be atomic per the project's transaction rules (see Task 7).
 
 - [ ] **Step 1: Add pgx dependency**
 
-Run: `cd api && go get github.com/jackc/pgx/v5@v5.7.1`
+Run: `cd api && go get github.com/jackc/pgx/v5@v5.7.1 github.com/jackc/pgx/v5/pgxpool@v5.7.1`
 
 - [ ] **Step 2: Implement `api/internal/db/user_repo.go`**
 
@@ -1718,7 +1732,7 @@ func (r *userRepository) CreateUser(ctx context.Context, u *auth.User) error {
 	if err != nil {
 		return err
 	}
-	u.ID = row.ID.String()
+	u.ID = uuidToString(row.ID)
 	u.CreatedAt = row.CreatedAt.Time
 	return nil
 }
@@ -1732,13 +1746,15 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, email string) (*aut
 		return nil, err
 	}
 	return &auth.User{
-		ID:           row.ID.String(),
+		ID:           uuidToString(row.ID),
 		Email:        row.Email,
 		PasswordHash: row.PasswordHash,
 		CreatedAt:    row.CreatedAt.Time,
 	}, nil
 }
 ```
+
+Note: `uuidToString` is defined in `game_repo.go` (Step 3) and used by both files within the same `db` package. `pgtype.UUID` has no `String()` method in pgx v5 (confirmed: it's `struct { Bytes [16]byte; Valid bool }`) — the helper formats the raw bytes into canonical UUID form directly.
 
 - [ ] **Step 3: Implement `api/internal/db/game_repo.go`**
 
@@ -1748,26 +1764,36 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Shyam576/chess-mind/api/internal/db/sqlcgen"
 	"github.com/Shyam576/chess-mind/api/internal/game"
 )
 
 type gameRepository struct {
-	q *sqlcgen.Queries
+	pool *pgxpool.Pool
+	q    *sqlcgen.Queries
 }
 
-func NewGameRepository(q *sqlcgen.Queries) game.Repository {
-	return &gameRepository{q: q}
+func NewGameRepository(pool *pgxpool.Pool) game.Repository {
+	return &gameRepository{pool: pool, q: sqlcgen.New(pool)}
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {
 	var u pgtype.UUID
 	err := u.Scan(s)
 	return u, err
+}
+
+// uuidToString formats a pgtype.UUID in canonical 8-4-4-4-12 form.
+// pgtype.UUID has no String method in pgx v5.
+func uuidToString(u pgtype.UUID) string {
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func toDomainGame(row sqlcgen.Game) *game.Game {
@@ -1777,8 +1803,8 @@ func toDomainGame(row sqlcgen.Game) *game.Game {
 		result = &r
 	}
 	return &game.Game{
-		ID:          row.ID.String(),
-		UserID:      row.UserID.String(),
+		ID:          uuidToString(row.ID),
+		UserID:      uuidToString(row.UserID),
 		Status:      game.Status(row.Status),
 		PlayerColor: game.Color(row.PlayerColor),
 		Difficulty:  int(row.Difficulty),
@@ -1800,7 +1826,7 @@ func (r *gameRepository) CreateGame(ctx context.Context, g *game.Game) error {
 	if err != nil {
 		return err
 	}
-	g.ID = row.ID.String()
+	g.ID = uuidToString(row.ID)
 	g.CreatedAt = row.CreatedAt.Time
 	g.UpdatedAt = row.UpdatedAt.Time
 	return nil
@@ -1845,8 +1871,8 @@ func (r *gameRepository) ListMoves(ctx context.Context, gameID string) ([]*game.
 	out := make([]*game.Move, len(rows))
 	for i, row := range rows {
 		out[i] = &game.Move{
-			ID:        row.ID.String(),
-			GameID:    row.GameID.String(),
+			ID:        uuidToString(row.ID),
+			GameID:    uuidToString(row.GameID),
 			PlyNumber: int(row.PlyNumber),
 			MoveSAN:   row.MoveSan,
 			MoveUCI:   row.MoveUci,
@@ -1857,8 +1883,19 @@ func (r *gameRepository) ListMoves(ctx context.Context, gameID string) ([]*game.
 	return out, nil
 }
 
-func (r *gameRepository) AppendMove(ctx context.Context, m *game.Move) error {
-	row, err := r.q.AppendMove(ctx, sqlcgen.AppendMoveParams{
+// AppendMoveAndUpdateState persists the move and the game's resulting state
+// in a single transaction: if either write fails, both are rolled back, so a
+// move is never recorded without its corresponding game-state update.
+func (r *gameRepository) AppendMoveAndUpdateState(ctx context.Context, m *game.Move, fen string, status game.Status, result *string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txQueries := sqlcgen.New(tx)
+
+	row, err := txQueries.AppendMove(ctx, sqlcgen.AppendMoveParams{
 		GameID:    mustUUID(m.GameID),
 		PlyNumber: int32(m.PlyNumber),
 		MoveSan:   m.MoveSAN,
@@ -1868,7 +1905,25 @@ func (r *gameRepository) AppendMove(ctx context.Context, m *game.Move) error {
 	if err != nil {
 		return err
 	}
-	m.ID = row.ID.String()
+
+	var pgResult pgtype.Text
+	if result != nil {
+		pgResult = pgtype.Text{String: *result, Valid: true}
+	}
+	if err := txQueries.UpdateGameState(ctx, sqlcgen.UpdateGameStateParams{
+		ID:         mustUUID(m.GameID),
+		CurrentFen: fen,
+		Status:     string(status),
+		Result:     pgResult,
+	}); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
+	m.ID = uuidToString(row.ID)
 	m.CreatedAt = row.CreatedAt.Time
 	return nil
 }
@@ -1947,7 +2002,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 	pool := testPool(t)
 	q := sqlcgen.New(pool)
 	userRepo := NewUserRepository(q)
-	gameRepo := NewGameRepository(q)
+	gameRepo := NewGameRepository(pool)
 	ctx := context.Background()
 
 	email := "repo-game-test-" + time.Now().Format("150405.000000") + "@example.com"
@@ -1965,7 +2020,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 	require.NotEmpty(t, g.ID)
 
 	m := &game.Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: "fen-after"}
-	require.NoError(t, gameRepo.AppendMove(ctx, m))
+	require.NoError(t, gameRepo.AppendMoveAndUpdateState(ctx, m, "fen-after", game.StatusInProgress, nil))
 
 	moves, err := gameRepo.ListMoves(ctx, g.ID)
 	require.NoError(t, err)
@@ -1986,7 +2041,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 Run:
 ```bash
 cd api
-export TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+export TEST_DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 go build ./...
 go test ./internal/db/... -v
 ```
@@ -2009,6 +2064,8 @@ git commit -m "feat: implement Postgres-backed user and game repositories"
 - Create: `api/internal/httpapi/router.go`
 - Create: `api/internal/httpapi/auth_handlers.go`
 - Test: `api/internal/httpapi/auth_handlers_test.go`
+
+Note: `router.go` only registers `/healthz` and `/api/auth/*` in this task. It takes a `gameSvc *game.Service` parameter (so its signature doesn't change later) but does not reference any `gameHandler` type or method yet — Task 10 modifies this file to add the `/api/games` route group once the real handler exists. There is no stub `gameHandler` in this task; one isn't needed since nothing in this task calls its methods.
 
 **Interfaces:**
 - Consumes: `auth.Service` (Task 6), `game.Service` (Task 7).
@@ -2062,7 +2119,9 @@ package httpapi
 
 import (
 	"context"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/Shyam576/chess-mind/api/internal/auth"
@@ -2106,6 +2165,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				log.Printf("panic: %v\n%s", rec, debug.Stack())
 				writeError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 			}
 		}()
@@ -2122,6 +2182,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -2153,6 +2214,7 @@ func (h *authHandler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "user_exists", "an account with that email already exists")
 			return
 		}
+		log.Printf("register: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "could not register user")
 		return
 	}
@@ -2172,7 +2234,12 @@ func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+			return
+		}
+		log.Printf("login: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "could not log in")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -2198,7 +2265,7 @@ func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 5: Write `api/internal/httpapi/router.go` (game routes registered as a no-op placeholder; filled in Task 10)**
+- [ ] **Step 5: Write `api/internal/httpapi/router.go`**
 
 ```go
 package httpapi
@@ -2229,36 +2296,15 @@ func NewRouter(authSvc *auth.Service, gameSvc *game.Service, jwtSecret []byte) h
 		r.Post("/logout", ah.logout)
 	})
 
-	gh := &gameHandler{svc: gameSvc}
-	r.Route("/api/games", func(r chi.Router) {
-		r.Use(requireAuth(jwtSecret))
-		r.Post("/", gh.create)
-		r.Get("/", gh.list)
-		r.Get("/{id}", gh.get)
-		r.Post("/{id}/moves", gh.submitMove)
-		r.Post("/{id}/resign", gh.resign)
-	})
-
+	// The /api/games route group is added in Task 10, once gameHandler exists.
+	// gameSvc and jwtSecret are accepted here (unused for now, which is not
+	// a compile error for function parameters in Go) so this function's
+	// signature never has to change.
 	return r
 }
 ```
 
-- [ ] **Step 6: Add a minimal `gameHandler` stub so the router compiles (full implementation in Task 10)**
-
-```go
-package httpapi
-
-import "net/http"
-
-type gameHandler struct {
-	svc interface {
-	}
-}
-```
-
-This stub file is `api/internal/httpapi/game_handlers_stub.go` and will be **deleted** in Task 10 when the real `gameHandler` (holding `*game.Service`) is implemented — do not test against it.
-
-- [ ] **Step 7: Write failing tests `api/internal/httpapi/auth_handlers_test.go`**
+- [ ] **Step 6: Write failing tests `api/internal/httpapi/auth_handlers_test.go`**
 
 ```go
 package httpapi
@@ -2330,12 +2376,12 @@ func TestLogin_InvalidCredentials(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Run tests**
+- [ ] **Step 7: Run tests**
 
 Run: `cd api && go test ./internal/httpapi/... -v`
-Expected: PASS for both tests. (`gameSvc` is passed as untyped `nil` here only because Task 10 replaces the stub handler with the real one accepting `*game.Service`; these two tests never exercise game routes.)
+Expected: PASS for both tests. (`gameSvc` is passed as untyped `nil` here since `router.go` doesn't use it yet in this task; these two tests only exercise `/api/auth/*` routes.)
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add api/go.mod api/go.sum api/internal/httpapi
@@ -2347,16 +2393,15 @@ git commit -m "feat: add HTTP router, auth middleware, and auth handlers"
 ## Task 10: HTTP layer — game handlers
 
 **Files:**
-- Delete: `api/internal/httpapi/game_handlers_stub.go`
 - Create: `api/internal/httpapi/game_handlers.go`
-- Modify: `api/internal/httpapi/router.go` (no change needed if the stub's field shape matches; see Step 1)
+- Modify: `api/internal/httpapi/router.go` (add the `/api/games` route group, now that `gameHandler` exists)
 - Test: `api/internal/httpapi/game_handlers_test.go`
 
 **Interfaces:**
 - Consumes: `game.Service` (Task 7) — `CreateGame`, `GetGame`, `ListGames`, `SubmitMove`, `Resign`, and sentinel errors `ErrNotFound`, `ErrForbidden`, `ErrNotYourTurn`, `ErrGameFinished`; `chessrules.ErrIllegalMove` (Task 4).
 - Produces: fully wired `/api/games...` routes.
 
-- [ ] **Step 1: Delete the stub and write the real `api/internal/httpapi/game_handlers.go`**
+- [ ] **Step 1: Write the real `api/internal/httpapi/game_handlers.go`**
 
 ```go
 package httpapi
@@ -2364,6 +2409,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -2430,12 +2476,31 @@ func handleServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, chessrules.ErrIllegalMove):
 		writeError(w, http.StatusBadRequest, "illegal_move", "that move is not legal in the current position")
 	default:
+		log.Printf("game handler: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 	}
 }
 
+// userIDOrUnauthorized reads the authenticated user ID from context, writing
+// a 401 and returning ok=false if it's missing. Every route in this handler
+// goes through requireAuth, which always sets this, but each handler checks
+// anyway rather than trusting that invariant silently — if a route were ever
+// mounted outside that middleware, an empty userID must never reach the
+// service layer.
+func userIDOrUnauthorized(w http.ResponseWriter, r *http.Request) (string, bool) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "missing session")
+		return "", false
+	}
+	return userID, true
+}
+
 func (h *gameHandler) create(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	var req createGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
@@ -2459,7 +2524,10 @@ func (h *gameHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) list(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	limit, offset := 20, 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
@@ -2484,7 +2552,10 @@ func (h *gameHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) get(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	g, moves, err := h.svc.GetGame(r.Context(), userID, id)
 	if err != nil {
@@ -2504,7 +2575,10 @@ type submitMoveRequest struct {
 }
 
 func (h *gameHandler) submitMove(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	var req submitMoveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -2527,7 +2601,10 @@ func (h *gameHandler) submitMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) resign(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	g, err := h.svc.Resign(r.Context(), userID, id)
 	if err != nil {
@@ -2538,9 +2615,45 @@ func (h *gameHandler) resign(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 2: Delete the stub file**
+- [ ] **Step 2: Modify `api/internal/httpapi/router.go` to add the `/api/games` route group**
 
-Run: `rm api/internal/httpapi/game_handlers_stub.go`
+Replace the four-line comment block immediately before `return r` (starting `// The /api/games route group is added in Task 10...`) with:
+
+```go
+	gh := &gameHandler{svc: gameSvc}
+	r.Route("/api/games", func(r chi.Router) {
+		r.Use(requireAuth(jwtSecret))
+		r.Post("/", gh.create)
+		r.Get("/", gh.list)
+		r.Get("/{id}", gh.get)
+		r.Post("/{id}/moves", gh.submitMove)
+		r.Post("/{id}/resign", gh.resign)
+	})
+```
+
+so `NewRouter` now ends with:
+
+```go
+	ah := &authHandler{svc: authSvc}
+	r.Route("/api/auth", func(r chi.Router) {
+		r.Post("/register", ah.register)
+		r.Post("/login", ah.login)
+		r.Post("/logout", ah.logout)
+	})
+
+	gh := &gameHandler{svc: gameSvc}
+	r.Route("/api/games", func(r chi.Router) {
+		r.Use(requireAuth(jwtSecret))
+		r.Post("/", gh.create)
+		r.Get("/", gh.list)
+		r.Get("/{id}", gh.get)
+		r.Post("/{id}/moves", gh.submitMove)
+		r.Post("/{id}/resign", gh.resign)
+	})
+
+	return r
+}
+```
 
 - [ ] **Step 3: Write failing tests `api/internal/httpapi/game_handlers_test.go`**
 
@@ -2595,8 +2708,12 @@ func (r *memGameRepo) ListGamesByUser(ctx context.Context, userID string, limit,
 func (r *memGameRepo) ListMoves(ctx context.Context, gameID string) ([]*game.Move, error) {
 	return r.moves[gameID], nil
 }
-func (r *memGameRepo) AppendMove(ctx context.Context, m *game.Move) error {
+func (r *memGameRepo) AppendMoveAndUpdateState(ctx context.Context, m *game.Move, fen string, status game.Status, result *string) error {
 	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
 	return nil
 }
 func (r *memGameRepo) UpdateGameState(ctx context.Context, id string, fen string, status game.Status, result *string) error {
@@ -2822,6 +2939,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("opening migration connection: %v", err)
 	}
+	if err := goose.SetDialect("postgres"); err != nil {
+		log.Fatalf("setting goose dialect: %v", err)
+	}
 	if err := goose.Up(migrationDB, "internal/db/migrations"); err != nil {
 		log.Fatalf("running migrations: %v", err)
 	}
@@ -2835,7 +2955,7 @@ func main() {
 
 	queries := sqlcgen.New(pool)
 	userRepo := db.NewUserRepository(queries)
-	gameRepo := db.NewGameRepository(queries)
+	gameRepo := db.NewGameRepository(pool)
 
 	enginePool, err := stockfish.NewPool(cfg.StockfishPath, cfg.StockfishPoolSize)
 	if err != nil {
@@ -2902,7 +3022,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -2919,7 +3039,7 @@ services:
       PORT: "8080"
       STOCKFISH_POOL_SIZE: "4"
     ports:
-      - "8080:8080"
+      - "8081:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -2928,25 +3048,27 @@ volumes:
   pgdata:
 ```
 
+Host port `8081` (not `8080`) is used because `8080` and `8082` may already be bound by unrelated processes/containers on the development machine — the container still listens on `8080` internally (`PORT: "8080"`), so nothing inside the compose network is affected. This is the same pattern as the Postgres host-port remap in Task 1.
+
 - [ ] **Step 6: Build and smoke-test**
 
 Run:
 ```bash
 docker compose up -d --build postgres api
 sleep 3
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:8081/healthz
 ```
 Expected: `{"status":"ok"}`.
 
 Run a full manual smoke test of the chess loop:
 ```bash
-curl -s -c /tmp/cookies.txt -X POST http://localhost:8080/api/auth/register \
+curl -s -c /tmp/cookies.txt -X POST http://localhost:8081/api/auth/register \
   -H 'Content-Type: application/json' -d '{"email":"smoke@example.com","password":"hunter2hunter2"}'
-curl -s -b /tmp/cookies.txt -c /tmp/cookies.txt -X POST http://localhost:8080/api/auth/login \
+curl -s -b /tmp/cookies.txt -c /tmp/cookies.txt -X POST http://localhost:8081/api/auth/login \
   -H 'Content-Type: application/json' -d '{"email":"smoke@example.com","password":"hunter2hunter2"}'
-GAME_ID=$(curl -s -b /tmp/cookies.txt -X POST http://localhost:8080/api/games \
+GAME_ID=$(curl -s -b /tmp/cookies.txt -X POST http://localhost:8081/api/games \
   -H 'Content-Type: application/json' -d '{"color":"white","difficulty":1}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-curl -s -b /tmp/cookies.txt -X POST http://localhost:8080/api/games/$GAME_ID/moves \
+curl -s -b /tmp/cookies.txt -X POST http://localhost:8081/api/games/$GAME_ID/moves \
   -H 'Content-Type: application/json' -d '{"from":"e2","to":"e4"}'
 ```
 Expected: the final response's `"moves"` array has two entries (the player's `e4` and Stockfish's reply).
@@ -2973,13 +3095,19 @@ git commit -m "feat: wire server entrypoint, config, Dockerfile, and full backen
 
 - [ ] **Step 1: Scaffold the Next.js app**
 
-Run:
+The `web/` directory does not exist yet — run the scaffolding tool from the repo root so it creates `web/` itself; do not `cd web` first.
+
+Run (`CI=1` forces the CLI to use its recommended defaults for anything not explicitly flagged, instead of prompting interactively — there is no TTY in this environment to answer a prompt):
 ```bash
+CI=1 npx --yes create-next-app@14 web --typescript --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm
 cd web
-npm create next-app@14 . -- --typescript --tailwind --eslint --app --src-dir=false --import-alias "@/*" --no-use-npm-workspaces
 npm install @tanstack/react-query chess.js react-chessboard
-npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react
+npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react@^5.2.0 vite@^7.3.7
 ```
+
+`@vitejs/plugin-react` and `vite` are pinned explicitly (not left to resolve to their unqualified latest versions) because of a confirmed, verified npm dependency-resolution issue: the unqualified `@vitejs/plugin-react` resolves to v6.x, which only supports Vite 8 — but `vitest`'s own internal dependency is Vite 7, and having two different major Vite versions present causes both a runtime JSX-transform failure (`ReferenceError: React is not defined` in tests) and a TypeScript type error in `vitest.config.ts` (`No overload matches this call`, from two incompatible `Plugin<any>` type definitions). `@vitejs/plugin-react@^5.2.0`'s peer range includes Vite 7, and adding `vite@^7.3.7` as an explicit top-level devDependency forces npm to fully deduplicate every nested copy to the same Vite 7.3.7 install — verified directly: `npx tsc --noEmit` reports zero errors and `npm test`/`npm run build` both pass cleanly with this combination.
+
+If the command still appears to hang waiting for input despite `CI=1`, it is prompting for something not covered by the flags above — check the printed prompt text, answer it once to see what option it needs, then add the matching flag (or its `--no-` negation) to this command for next time and report what was missing.
 
 - [ ] **Step 2: Write `web/lib/api-client.ts`**
 
@@ -2995,7 +3123,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8081";
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
@@ -3177,7 +3305,7 @@ git commit -m "feat: scaffold Next.js frontend with Tailwind, React Query, and A
 - [ ] **Step 1: Write `web/vitest.config.ts`**
 
 ```typescript
-import { defineConfig } from "vitest/config";
+import { defineConfig, configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
@@ -3188,9 +3316,12 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     globals: true,
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });
 ```
+
+Note: `exclude` here is forward-looking — at this point in the plan `web/e2e/` doesn't exist yet (Task 17 creates it), but Vitest's default test-file glob would otherwise also match a `*.spec.ts` file under `e2e/` later and try to run it with Vitest's own runner, which conflicts with Playwright's test registration (`@playwright/test`'s `test()` throws "did not expect test() to be called here" when invoked outside Playwright's own runner). Confirmed by actually running `npm test` against the real `e2e/golden-path.spec.ts` from Task 17 — it fails without this exclusion and passes cleanly with it.
 
 - [ ] **Step 2: Write `web/vitest.setup.ts`**
 
@@ -3355,6 +3486,8 @@ export default function RegisterPage() {
 
 - [ ] **Step 6: Write failing test `web/app/login/page.test.tsx`**
 
+Note: mocks use `vi.mocked(global.fetch)` (typed) rather than `(global.fetch as any)` — the project's ESLint config (from `create-next-app --eslint`) flags `@typescript-eslint/no-explicit-any` as an error, which fails `next build`'s lint step. The minimal mock response objects are cast `as Response` (a legitimate, narrow type assertion — not `any`) since they don't implement every `Response` interface member.
+
 ```tsx
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -3370,11 +3503,11 @@ describe("LoginPage", () => {
   });
 
   it("redirects to /play on successful login", async () => {
-    (global.fetch as any).mockResolvedValue({
+    vi.mocked(global.fetch).mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({ id: "1", email: "a@example.com" }),
-    });
+    } as Response);
 
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "a@example.com" } });
@@ -3385,11 +3518,11 @@ describe("LoginPage", () => {
   });
 
   it("shows an error message on invalid credentials", async () => {
-    (global.fetch as any).mockResolvedValue({
+    vi.mocked(global.fetch).mockResolvedValue({
       ok: false,
       status: 401,
       json: async () => ({ error: { code: "invalid_credentials", message: "Incorrect email or password" } }),
-    });
+    } as Response);
 
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "a@example.com" } });
@@ -3401,10 +3534,13 @@ describe("LoginPage", () => {
 });
 ```
 
-- [ ] **Step 7: Run tests**
+- [ ] **Step 7: Run tests and verify the production build still succeeds**
 
 Run: `cd web && npm test`
 Expected: both `LoginPage` tests PASS.
+
+Also run: `npm run build`
+Expected: succeeds cleanly (Next.js's build lints the whole project, including test files, and fails on lint errors — this is how the `no-explicit-any` issue above was originally caught).
 
 - [ ] **Step 8: Commit**
 
@@ -3563,11 +3699,16 @@ git commit -m "feat: add new game setup page with color and difficulty selection
 - Create: `web/app/game/[id]/page.tsx`
 - Create: `web/components/chessboard/GameBoard.tsx`
 - Create: `web/components/chessboard/MoveHistory.tsx`
+- Create: `web/components/chessboard/PromotionDialog.tsx`
 - Test: `web/components/chessboard/GameBoard.test.tsx`
 
 **Interfaces:**
 - Consumes: `apiFetch`, `GameResponse`, `MoveResponse`, `GameWithMoves` (Tasks 12, 14); `chess.js`, `react-chessboard`.
 - Produces: the primary gameplay surface — this is the component exercised by the Task 17 E2E test.
+
+**Note on promotion:** `react-chessboard`'s own promotion-piece-code format varies across versions/forks and is not safe to guess. Promotion is instead detected locally with `chess.js` (`probe.moves({ square, verbose: true })`, checking the matching move's `promotion` field) and resolved with our own `PromotionDialog` component — never by parsing `react-chessboard`'s `onPieceDrop` piece argument.
+
+Task 12 pinned `react-chessboard@4.7.3` specifically (the unqualified `"react-chessboard"` resolves to v5.x, which requires React 19 — incompatible with `create-next-app@14`'s React 18 scaffold). Confirmed against v4.7.3's actual README: `onPieceDrop`'s real signature is `(sourceSquare, targetSquare, piece) => boolean` (three params; our two-param `onDrop` is fine — TypeScript allows a callback with fewer declared parameters). The library also has its own built-in promotion handling (`autoPromoteToQueen`, `onPromotionCheck`, `showPromotionDialog`, etc.) whose automatic-vs-manual default behavior the README does not state outright. `showPromotionDialog={false}` (`<Chessboard>`'s own documented default) is passed explicitly below so the library's internal dialog mechanism can never fire regardless of that ambiguity — our own `chess.js`-based detection and `PromotionDialog` component have sole control.
 
 - [ ] **Step 1: Write `web/components/chessboard/MoveHistory.tsx`**
 
@@ -3599,46 +3740,88 @@ export function MoveHistory({ moves }: { moves: MoveResponse[] }) {
 }
 ```
 
-- [ ] **Step 2: Write `web/components/chessboard/GameBoard.tsx`**
+- [ ] **Step 2: Write `web/components/chessboard/PromotionDialog.tsx`**
+
+```tsx
+type PromotionPiece = "q" | "r" | "b" | "n";
+
+const PIECES: { value: PromotionPiece; label: string }[] = [
+  { value: "q", label: "Queen" },
+  { value: "r", label: "Rook" },
+  { value: "b", label: "Bishop" },
+  { value: "n", label: "Knight" },
+];
+
+export function PromotionDialog({
+  onSelect,
+  onCancel,
+}: {
+  onSelect: (piece: PromotionPiece) => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/40"
+      role="dialog"
+      aria-label="Choose promotion piece"
+    >
+      <div className="flex gap-2 rounded bg-white p-4 shadow-lg dark:bg-neutral-900">
+        {PIECES.map((p) => (
+          <button
+            key={p.value}
+            onClick={() => onSelect(p.value)}
+            className="rounded border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          onClick={onCancel}
+          className="rounded border border-neutral-300 px-3 py-2 text-sm dark:border-neutral-700"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+```
+
+- [ ] **Step 3: Write `web/components/chessboard/GameBoard.tsx`**
 
 ```tsx
 "use client";
 
 import { useMemo, useState } from "react";
 import { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import type { GameResponse, GameWithMoves, MoveResponse } from "@/lib/types";
 import { MoveHistory } from "./MoveHistory";
+import { PromotionDialog } from "./PromotionDialog";
+
+type PendingPromotion = { from: string; to: string };
 
 export function GameBoard({ initial }: { initial: GameWithMoves }) {
   const [game, setGame] = useState<GameResponse>(initial.game);
   const [moves, setMoves] = useState<MoveResponse[]>(initial.moves);
   const [error, setError] = useState<string | null>(null);
   const [thinking, setThinking] = useState(false);
+  const [pendingPromotion, setPendingPromotion] = useState<PendingPromotion | null>(null);
 
   const chessInstance = useMemo(() => new Chess(game.current_fen), [game.current_fen]);
   const isGameOver = game.status !== "in_progress";
 
-  async function onDrop(sourceSquare: string, targetSquare: string, piece: string) {
+  async function submitMove(from: string, to: string, promotion: string) {
     setError(null);
-    const promotion = piece.length > 1 && piece.toLowerCase().endsWith("p") === false
-      ? piece[1].toLowerCase()
-      : "";
-
-    const probe = new Chess(game.current_fen);
-    const legal = probe.move({ from: sourceSquare, to: targetSquare, promotion: promotion || "q" });
-    if (!legal) {
-      return false;
-    }
-
     setThinking(true);
     try {
       const resp = await apiFetch<{ game: GameResponse; moves: MoveResponse[] }>(
         `/api/games/${game.id}/moves`,
         {
           method: "POST",
-          body: JSON.stringify({ from: sourceSquare, to: targetSquare, promotion }),
+          body: JSON.stringify({ from, to, promotion }),
         }
       );
       setGame(resp.game);
@@ -3650,6 +3833,31 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
     } finally {
       setThinking(false);
     }
+  }
+
+  function onDrop(sourceSquare: string, targetSquare: string) {
+    // chess.js is used here only to detect whether this is a promotion move
+    // (it has its own verbose move list); the backend independently
+    // re-validates and is authoritative for legality.
+    const probe = new Chess(game.current_fen);
+    const candidates = probe.moves({ square: sourceSquare as Square, verbose: true });
+    const match = candidates.find((m) => m.to === targetSquare);
+    if (!match) {
+      return false;
+    }
+    if (match.promotion) {
+      setPendingPromotion({ from: sourceSquare, to: targetSquare });
+      return false;
+    }
+    void submitMove(sourceSquare, targetSquare, "");
+    return true;
+  }
+
+  function choosePromotion(piece: "q" | "r" | "b" | "n") {
+    if (!pendingPromotion) return;
+    const { from, to } = pendingPromotion;
+    setPendingPromotion(null);
+    void submitMove(from, to, piece);
   }
 
   async function resign() {
@@ -3668,8 +3876,12 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
           position={chessInstance.fen()}
           onPieceDrop={onDrop}
           boardOrientation={game.player_color}
-          arePiecesDraggable={!isGameOver}
+          arePiecesDraggable={!isGameOver && !thinking}
+          showPromotionDialog={false}
         />
+        {pendingPromotion && (
+          <PromotionDialog onSelect={choosePromotion} onCancel={() => setPendingPromotion(null)} />
+        )}
         {thinking && <p className="mt-2 text-sm text-neutral-500">Stockfish is thinking…</p>}
         {error && (
           <p role="alert" className="mt-2 text-sm text-red-600">
@@ -3699,7 +3911,7 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
 }
 ```
 
-- [ ] **Step 3: Write `web/app/game/[id]/page.tsx`** (server component fetching initial state; note: the backend session cookie must be forwarded for this server-side fetch, so this page fetches client-side instead to reuse the browser's cookie jar)
+- [ ] **Step 4: Write `web/app/game/[id]/page.tsx`** (server component fetching initial state; note: the backend session cookie must be forwarded for this server-side fetch, so this page fetches client-side instead to reuse the browser's cookie jar)
 
 ```tsx
 "use client";
@@ -3735,7 +3947,7 @@ export default function GamePage() {
 }
 ```
 
-- [ ] **Step 4: Write failing test `web/components/chessboard/GameBoard.test.tsx`**
+- [ ] **Step 5: Write failing test `web/components/chessboard/GameBoard.test.tsx`**
 
 ```tsx
 import { render, screen } from "@testing-library/react";
@@ -3781,12 +3993,12 @@ describe("GameBoard", () => {
 });
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 6: Run tests**
 
 Run: `cd web && npm test`
 Expected: both `GameBoard` tests PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add web
@@ -3822,8 +4034,14 @@ export default function GamesHistoryPage() {
 
   useEffect(() => {
     apiFetch<GameResponse[]>(`/api/games?limit=${PAGE_SIZE}&offset=${page * PAGE_SIZE}`)
-      .then(setGames)
-      .catch((err) => setError(err instanceof ApiError ? err.message : "Could not load game history."));
+      .then((data) => {
+        setError(null);
+        setGames(data);
+      })
+      .catch((err) => {
+        setGames([]);
+        setError(err instanceof ApiError ? err.message : "Could not load game history.");
+      });
   }, [page]);
 
   return (
@@ -3888,9 +4106,13 @@ git commit -m "feat: add paginated game history page"
 - Modify: `docker-compose.yml` (add `web` service)
 - Create: `web/playwright.config.ts`
 - Create: `web/e2e/golden-path.spec.ts`
+- Create: `web/public/.gitkeep` (see Step 4a)
+- Modify: `api/internal/httpapi/middleware.go`, `api/internal/httpapi/router.go` (add CORS support, see Step 4b)
 
 **Interfaces:**
 - Consumes: the full stack from Tasks 1–16.
+
+**Note on scope:** this task discovers two things that only become visible once a real browser makes cross-origin, credentialed requests against the live stack — something no earlier task's testing (Go `httptest`, `curl`, Vitest component tests) could surface, since none of those go through an actual browser's CORS enforcement. Steps 4a and 4b fix both; they are not optional polish — the golden-path E2E test cannot pass without them.
 
 - [ ] **Step 1: Write `web/Dockerfile`**
 
@@ -3900,6 +4122,8 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
 
 FROM node:20-bookworm-slim
@@ -3912,18 +4136,23 @@ EXPOSE 3000
 CMD ["npm", "run", "start"]
 ```
 
+`NEXT_PUBLIC_API_URL` must be passed as a build `ARG`, not a container-runtime `environment:` variable: Next.js inlines every `NEXT_PUBLIC_*` reference into the client-side bundle during `next build` (the first stage, which runs during `docker build`, before any `docker-compose.yml` runtime environment ever exists) — setting it only at container runtime has no effect on an already-built bundle.
+
 - [ ] **Step 2: Add the `web` service to `docker-compose.yml`**
 
 ```yaml
   web:
-    build: ./web
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8081
     ports:
-      - "3000:3000"
+      - "3001:3000"
     depends_on:
       - api
 ```
+
+Host port `3001` (not `3000`) is used because `3000` may already be bound by an unrelated process on the development machine — the container still listens on `3000` internally. Same pattern as the Postgres and API host-port remaps in Tasks 1 and 11.
 
 (Append under the existing `services:` key alongside `postgres` and `api` from Task 11.)
 
@@ -3937,10 +4166,10 @@ import { defineConfig } from "@playwright/test";
 
 export default defineConfig({
   testDir: "./e2e",
-  use: { baseURL: "http://localhost:3000" },
+  use: { baseURL: "http://localhost:3001" },
   webServer: {
-    command: "npm run dev",
-    url: "http://localhost:3000",
+    command: "npm run dev -- -p 3001",
+    url: "http://localhost:3001",
     reuseExistingServer: true,
     timeout: 30_000,
   },
@@ -3978,6 +4207,80 @@ test("register, play a game to resignation, see it in history", async ({ page })
 });
 ```
 
+- [ ] **Step 4a: Ensure `web/public/` exists**
+
+The Dockerfile's `COPY --from=build /app/public ./public` requires a `public/` directory to exist in the build stage, even if empty (a missing source path fails a Docker `COPY`). If `create-next-app`'s scaffold in Task 12 didn't produce one in this repo, add a placeholder so it's tracked by git (git does not track empty directories):
+
+Run: `mkdir -p web/public && touch web/public/.gitkeep`
+
+- [ ] **Step 4b: Add CORS support to the Go API**
+
+The frontend (`http://localhost:3001`) and the API (`http://localhost:8081`) are different origins. The frontend's `apiFetch` already sends `credentials: "include"` (Task 12) for cookie-based auth, so the browser requires the API to explicitly allow that origin via CORS — including answering the preflight `OPTIONS` request the browser sends before the real one. Without this, every authenticated request from a real browser fails (confirmed via `docker compose logs api`: a bare 405 from chi on the preflight). This is invisible to `curl`, Go's `httptest`, and Vitest component tests, since none of them are a real browser enforcing CORS.
+
+Add to `api/internal/httpapi/middleware.go` (alongside the existing `requireAuth`/`recoverMiddleware`):
+
+```go
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"runtime/debug"
+	"strings"
+
+	"github.com/Shyam576/chess-mind/api/internal/auth"
+)
+```
+
+(add `"os"` to the existing import block)
+
+```go
+// corsAllowedOrigin returns the single origin the API accepts cross-origin
+// requests from. The frontend is a separate origin (its own Docker service
+// and host port) from the API, and the browser enforces CORS for the
+// cookie-authenticated requests it makes, so the API must explicitly allow
+// that origin. Defaults to the frontend's local dev/compose origin; override
+// with CORS_ALLOWED_ORIGIN for other environments.
+func corsAllowedOrigin() string {
+	if v := os.Getenv("CORS_ALLOWED_ORIGIN"); v != "" {
+		return v
+	}
+	return "http://localhost:3001"
+}
+
+// corsMiddleware allows the configured frontend origin to make
+// credentialed (cookie-based) cross-origin requests to the API, and answers
+// the browser's CORS preflight (OPTIONS) requests that precede them. Only
+// an exact-matching origin is ever echoed back (never "*"), since
+// Access-Control-Allow-Credentials forbids a wildcard origin.
+func corsMiddleware(next http.Handler) http.Handler {
+	allowedOrigin := corsAllowedOrigin()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && origin == allowedOrigin {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+```
+
+In `api/internal/httpapi/router.go`, register it alongside the other global middleware, **before** any route is registered, so it wraps every request including preflight `OPTIONS` to protected routes (which must never reach `requireAuth`, since a preflight carries no credentials):
+
+```go
+	r.Use(middleware.Logger)
+	r.Use(recoverMiddleware)
+	r.Use(corsMiddleware)
+```
+
 - [ ] **Step 5: Run the full stack and the E2E test**
 
 Run:
@@ -3990,7 +4293,7 @@ Expected: the `golden-path` test PASSES against the live backend started via Doc
 - [ ] **Step 6: Commit**
 
 ```bash
-git add web/Dockerfile docker-compose.yml web/playwright.config.ts web/e2e web/package.json web/package-lock.json
+git add web/Dockerfile docker-compose.yml web/playwright.config.ts web/e2e web/package.json web/package-lock.json web/public api/internal/httpapi/middleware.go api/internal/httpapi/router.go
 git commit -m "feat: add frontend Dockerfile, full compose stack, and golden-path E2E test"
 ```
 
@@ -4018,7 +4321,9 @@ A chess application: play against an adjustable Stockfish opponent, with the Go 
 
 1. Copy `.env.example` to `.env` and adjust if needed.
 2. `docker compose up -d --build` — starts Postgres, the Go API (migrations run automatically on boot), and the Next.js frontend.
-3. Visit `http://localhost:3000`.
+3. Visit `http://localhost:3001`.
+
+Host ports (`5434` for Postgres, `8081` for the API, `3001` for the frontend) are intentionally non-default — `5432`/`8080`/`3000` were already in use by unrelated processes on the machine this was built and verified on. Each service's container-internal port is unchanged (`5432`, `8080`, `3000` respectively); only the host-side mapping differs. Edit the `ports:` entries in `docker-compose.yml` if you'd prefer the conventional defaults and they're free on your machine.
 
 ## Running tests
 
@@ -4026,7 +4331,7 @@ Backend:
 ```bash
 cd api
 go test ./...                                   # unit tests only
-TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable \
+TEST_DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable \
   go test ./internal/db/... -v                   # + repository integration tests
 ```
 
@@ -4046,6 +4351,7 @@ npx playwright test   # end-to-end golden path (requires the full stack running)
 | `PORT` | api | HTTP port (default 8080) |
 | `STOCKFISH_PATH` | api | Path to the Stockfish binary |
 | `STOCKFISH_POOL_SIZE` | api | Number of long-lived engine processes |
+| `CORS_ALLOWED_ORIGIN` | api | Frontend origin allowed to make credentialed cross-origin requests (default `http://localhost:3001`) |
 | `NEXT_PUBLIC_API_URL` | web | Base URL the frontend calls |
 
 ## Known limitations (by design, this slice)
@@ -4057,12 +4363,12 @@ npx playwright test   # end-to-end golden path (requires the full stack running)
 
 - [ ] **Step 2: Full-stack final verification**
 
-Run:
+Run (sequentially, in one shell so each `cd` carries into the next line):
 ```bash
 cd api && go build ./... && go test ./...
 cd ../web && npm run build && npm test
-docker compose up -d --build
-curl -s http://localhost:8080/healthz
+cd .. && docker compose up -d --build
+curl -s http://localhost:8081/healthz
 cd web && npx playwright test
 ```
 Expected: Go build and tests pass; frontend build and Vitest tests pass; health check returns `{"status":"ok"}`; Playwright golden-path test passes.
@@ -4072,5 +4378,6 @@ Expected: Go build and tests pass; frontend build and Vitest tests pass; health 
 ```bash
 git add README.md
 git commit -m "docs: add README with setup, env vars, and test instructions"
-git push
 ```
+
+Do not push. This is the last task of the Foundation implementation plan — pushing (and deciding whether/how to merge this feature branch) is a separate decision made via the finishing-a-development-branch process after the final whole-branch review, not a routine step of this task.

@@ -1,0 +1,204 @@
+package game
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/Shyam576/chess-mind/api/internal/chessrules"
+	"github.com/Shyam576/chess-mind/api/internal/stockfish"
+)
+
+type memRepo struct {
+	games map[string]*Game
+	moves map[string][]*Move
+}
+
+func newMemRepo() *memRepo {
+	return &memRepo{games: map[string]*Game{}, moves: map[string][]*Move{}}
+}
+
+func (r *memRepo) CreateGame(ctx context.Context, g *Game) error {
+	r.games[g.ID] = g
+	return nil
+}
+
+func (r *memRepo) GetGame(ctx context.Context, id string) (*Game, error) {
+	g, ok := r.games[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return g, nil
+}
+
+func (r *memRepo) ListGamesByUser(ctx context.Context, userID string, limit, offset int) ([]*Game, error) {
+	var out []*Game
+	for _, g := range r.games {
+		if g.UserID == userID {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
+func (r *memRepo) ListMoves(ctx context.Context, gameID string) ([]*Move, error) {
+	return r.moves[gameID], nil
+}
+
+func (r *memRepo) AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error {
+	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
+	return nil
+}
+
+func (r *memRepo) UpdateGameState(ctx context.Context, id string, fen string, status Status, result *string) error {
+	g := r.games[id]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
+	return nil
+}
+
+func TestCreateGame(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	g, err := svc.CreateGame(context.Background(), "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+	assert.Equal(t, chessrules.NewGameFEN(), g.CurrentFEN)
+	assert.Equal(t, StatusInProgress, g.Status)
+}
+
+func TestSubmitMove_PlayerThenBotReply(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	updated, moves, err := svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	require.NoError(t, err)
+	require.Len(t, moves, 2)
+	assert.Equal(t, "e4", moves[0].MoveSAN)
+	assert.Equal(t, "e5", moves[1].MoveSAN)
+	assert.Equal(t, StatusInProgress, updated.Status)
+}
+
+func TestSubmitMove_WrongTurn(t *testing.T) {
+	repo := newMemRepo()
+	// The engine is down so the self-heal attempt cannot play the bot's
+	// move; the turn guard must still reject the player's move.
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("engine unavailable")})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	// Simulate an out-of-band move (e.g. a concurrent request) so the
+	// recorded ply count says it is Black's turn, even though the
+	// registered player for this game is White.
+	require.NoError(t, repo.AppendMoveAndUpdateState(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}, g.CurrentFEN, StatusInProgress, nil))
+
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
+	assert.ErrorIs(t, err, ErrNotYourTurn)
+}
+
+func TestSubmitMove_SelfHealsAfterBotFailure(t *testing.T) {
+	repo := newMemRepo()
+	failing := &stockfish.StubEngine{Err: errors.New("engine unavailable")}
+	svc := NewService(repo, failing)
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	// The bot's reply fails, but the player's own move must still succeed.
+	updated, moves, err := svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	require.NoError(t, err)
+	require.Len(t, moves, 1)
+	assert.Equal(t, "e4", moves[0].MoveSAN)
+	assert.Equal(t, StatusInProgress, updated.Status)
+
+	// The game is now stuck on the bot's turn. Fix the engine and retry: the
+	// next submit must self-heal (play the missed bot reply) and then also
+	// apply the player's new move.
+	svc.engine = &stockfish.StubEngine{Move: "e7e5"}
+	updated, moves, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "g1", To: "f3"})
+	require.NoError(t, err)
+	// Healed e7e5 reply, then Nf3. The stub's fixed "e7e5" is illegal as the
+	// bot's follow-up reply, so that trailing reply fails and is not included.
+	require.Len(t, moves, 2)
+	assert.Equal(t, "e5", moves[0].MoveSAN)
+	assert.Equal(t, "Nf3", moves[1].MoveSAN)
+	assert.Equal(t, StatusInProgress, updated.Status)
+}
+
+func TestGetGame_SelfHealsStuckBotTurn(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("down")})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	require.NoError(t, err) // bot reply fails silently, player's move still recorded
+
+	svc.engine = &stockfish.StubEngine{Move: "e7e5"}
+	_, moves, err := svc.GetGame(ctx, "user-1", g.ID)
+	require.NoError(t, err)
+	require.Len(t, moves, 2)
+	assert.Equal(t, "e5", moves[1].MoveSAN)
+}
+
+func TestCreateGame_BlackSucceedsWhenEngineDown(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("down")})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorBlack, 5)
+	require.NoError(t, err) // the game row exists; the opening move is healed later
+
+	svc.engine = &stockfish.StubEngine{Move: "e2e4"}
+	_, moves, err := svc.GetGame(ctx, "user-1", g.ID)
+	require.NoError(t, err)
+	require.Len(t, moves, 1)
+	assert.Equal(t, "e4", moves[0].MoveSAN)
+}
+
+func TestSubmitMove_NotOwner(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	_, _, err = svc.SubmitMove(ctx, "someone-else", g.ID, MoveRequest{From: "e2", To: "e4"})
+	assert.ErrorIs(t, err, ErrForbidden)
+}
+
+func TestSubmitMove_IllegalMove(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e5"})
+	assert.ErrorIs(t, err, chessrules.ErrIllegalMove)
+}
+
+func TestResign(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	updated, err := svc.Resign(ctx, "user-1", g.ID)
+	require.NoError(t, err)
+	assert.Equal(t, StatusResigned, updated.Status)
+
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	assert.ErrorIs(t, err, ErrGameFinished)
+}
