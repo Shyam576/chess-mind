@@ -57,7 +57,7 @@
 - [ ] **Step 2: Write `.env.example`**
 
 ```bash
-DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
 JWT_SECRET=dev-secret-change-me
 PORT=8080
 STOCKFISH_PATH=/usr/games/stockfish
@@ -77,7 +77,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -89,6 +89,8 @@ services:
 volumes:
   pgdata:
 ```
+
+Host port `5434` (not the default `5432`) is used because `5432` and `5433` may already be bound by other Postgres instances on the development machine; the container still listens on `5432` internally, so container-to-container traffic (the `api` service's `DATABASE_URL`, added in Task 11) is unaffected.
 
 - [ ] **Step 4: Verify Postgres starts**
 
@@ -214,7 +216,7 @@ Run:
 ```bash
 cd api
 go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
-export DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+export DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
 make migrate-up
 docker compose exec postgres psql -U chessmind -d chessmind -c '\dt'
 ```
@@ -1989,7 +1991,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 Run:
 ```bash
 cd api
-export TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable
+export TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
 go build ./...
 go test ./internal/db/... -v
 ```
@@ -2905,7 +2907,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5432:5432"
+      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -4106,7 +4108,7 @@ Backend:
 ```bash
 cd api
 go test ./...                                   # unit tests only
-TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5432/chessmind?sslmode=disable \
+TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable \
   go test ./internal/db/... -v                   # + repository integration tests
 ```
 
