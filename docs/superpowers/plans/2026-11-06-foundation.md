@@ -2119,7 +2119,9 @@ package httpapi
 
 import (
 	"context"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	"github.com/Shyam576/chess-mind/api/internal/auth"
@@ -2163,6 +2165,7 @@ func recoverMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
+				log.Printf("panic: %v\n%s", rec, debug.Stack())
 				writeError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 			}
 		}()
@@ -2179,6 +2182,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -2210,6 +2214,7 @@ func (h *authHandler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "user_exists", "an account with that email already exists")
 			return
 		}
+		log.Printf("register: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "could not register user")
 		return
 	}
@@ -2229,7 +2234,12 @@ func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+			return
+		}
+		log.Printf("login: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "could not log in")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
