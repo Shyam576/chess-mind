@@ -62,7 +62,7 @@ JWT_SECRET=dev-secret-change-me
 PORT=8080
 STOCKFISH_PATH=/usr/games/stockfish
 STOCKFISH_POOL_SIZE=4
-NEXT_PUBLIC_API_URL=http://localhost:8080
+NEXT_PUBLIC_API_URL=http://localhost:8081
 ```
 
 - [ ] **Step 3: Write `docker-compose.yml` (postgres only for now; `api`/`web` added in later tasks)**
@@ -3039,7 +3039,7 @@ services:
       PORT: "8080"
       STOCKFISH_POOL_SIZE: "4"
     ports:
-      - "8080:8080"
+      - "8081:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -3048,25 +3048,27 @@ volumes:
   pgdata:
 ```
 
+Host port `8081` (not `8080`) is used because `8080` and `8082` may already be bound by unrelated processes/containers on the development machine — the container still listens on `8080` internally (`PORT: "8080"`), so nothing inside the compose network is affected. This is the same pattern as the Postgres host-port remap in Task 1.
+
 - [ ] **Step 6: Build and smoke-test**
 
 Run:
 ```bash
 docker compose up -d --build postgres api
 sleep 3
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:8081/healthz
 ```
 Expected: `{"status":"ok"}`.
 
 Run a full manual smoke test of the chess loop:
 ```bash
-curl -s -c /tmp/cookies.txt -X POST http://localhost:8080/api/auth/register \
+curl -s -c /tmp/cookies.txt -X POST http://localhost:8081/api/auth/register \
   -H 'Content-Type: application/json' -d '{"email":"smoke@example.com","password":"hunter2hunter2"}'
-curl -s -b /tmp/cookies.txt -c /tmp/cookies.txt -X POST http://localhost:8080/api/auth/login \
+curl -s -b /tmp/cookies.txt -c /tmp/cookies.txt -X POST http://localhost:8081/api/auth/login \
   -H 'Content-Type: application/json' -d '{"email":"smoke@example.com","password":"hunter2hunter2"}'
-GAME_ID=$(curl -s -b /tmp/cookies.txt -X POST http://localhost:8080/api/games \
+GAME_ID=$(curl -s -b /tmp/cookies.txt -X POST http://localhost:8081/api/games \
   -H 'Content-Type: application/json' -d '{"color":"white","difficulty":1}' | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-curl -s -b /tmp/cookies.txt -X POST http://localhost:8080/api/games/$GAME_ID/moves \
+curl -s -b /tmp/cookies.txt -X POST http://localhost:8081/api/games/$GAME_ID/moves \
   -H 'Content-Type: application/json' -d '{"from":"e2","to":"e4"}'
 ```
 Expected: the final response's `"moves"` array has two entries (the player's `e4` and Stockfish's reply).
@@ -3117,7 +3119,7 @@ export class ApiError extends Error {
   }
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8081";
 
 export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
@@ -4115,7 +4117,7 @@ CMD ["npm", "run", "start"]
   web:
     build: ./web
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8080
+      NEXT_PUBLIC_API_URL: http://localhost:8081
     ports:
       - "3000:3000"
     depends_on:
@@ -4259,7 +4261,7 @@ Run (sequentially, in one shell so each `cd` carries into the next line):
 cd api && go build ./... && go test ./...
 cd ../web && npm run build && npm test
 cd .. && docker compose up -d --build
-curl -s http://localhost:8080/healthz
+curl -s http://localhost:8081/healthz
 cd web && npx playwright test
 ```
 Expected: Go build and tests pass; frontend build and Vitest tests pass; health check returns `{"status":"ok"}`; Playwright golden-path test passes.
