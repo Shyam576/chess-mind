@@ -3698,6 +3698,8 @@ git commit -m "feat: add new game setup page with color and difficulty selection
 
 **Note on promotion:** `react-chessboard`'s own promotion-piece-code format varies across versions/forks and is not safe to guess. Promotion is instead detected locally with `chess.js` (`probe.moves({ square, verbose: true })`, checking the matching move's `promotion` field) and resolved with our own `PromotionDialog` component — never by parsing `react-chessboard`'s `onPieceDrop` piece argument.
 
+Task 12 pinned `react-chessboard@4.7.3` specifically (the unqualified `"react-chessboard"` resolves to v5.x, which requires React 19 — incompatible with `create-next-app@14`'s React 18 scaffold). Confirmed against v4.7.3's actual README: `onPieceDrop`'s real signature is `(sourceSquare, targetSquare, piece) => boolean` (three params; our two-param `onDrop` is fine — TypeScript allows a callback with fewer declared parameters). The library also has its own built-in promotion handling (`autoPromoteToQueen`, `onPromotionCheck`, `showPromotionDialog`, etc.) whose automatic-vs-manual default behavior the README does not state outright. `showPromotionDialog={false}` (`<Chessboard>`'s own documented default) is passed explicitly below so the library's internal dialog mechanism can never fire regardless of that ambiguity — our own `chess.js`-based detection and `PromotionDialog` component have sole control.
+
 - [ ] **Step 1: Write `web/components/chessboard/MoveHistory.tsx`**
 
 ```tsx
@@ -3867,6 +3869,7 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
           onPieceDrop={onDrop}
           boardOrientation={game.player_color}
           arePiecesDraggable={!isGameOver}
+          showPromotionDialog={false}
         />
         {pendingPromotion && (
           <PromotionDialog onSelect={choosePromotion} onCancel={() => setPendingPromotion(null)} />
