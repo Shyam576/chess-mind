@@ -454,16 +454,14 @@ func TestApplyMove_EnPassant(t *testing.T) {
 }
 
 func TestApplyMove_Promotion(t *testing.T) {
-	// Build a position where white can promote: clear the board down to a pawn on the 7th rank
-	// via a long forced sequence is brittle; instead verify promotion string plumbing using
-	// notnil/chess's own UCI decode on a reachable promotion position reached from a few plies.
+	// Advance a white pawn to a7 while keeping it alive (no piece ever captures it),
+	// and clear a8 so the promotion is a clean non-capturing advance.
 	prior := []string{}
 	setup := [][3]string{
 		{"a2", "a4", ""}, {"b7", "b5", ""},
 		{"a4", "b5", ""}, {"a7", "a6", ""},
-		{"b5", "a6", ""}, {"b8", "a6", ""},
-		{"a1", "a6", ""}, {"c7", "c6", ""},
-		{"a6", "a7", ""}, {"d7", "d6", ""},
+		{"b5", "a6", ""}, {"b8", "c6", ""},
+		{"a6", "a7", ""}, {"a8", "b8", ""},
 	}
 	for _, m := range setup {
 		res, err := ApplyMove(prior, m[0], m[1], m[2])
