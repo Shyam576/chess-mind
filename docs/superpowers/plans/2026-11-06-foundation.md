@@ -1699,7 +1699,7 @@ git commit -m "feat: add game domain service orchestrating chess rules, Stockfis
 
 - [ ] **Step 1: Add pgx dependency**
 
-Run: `cd api && go get github.com/jackc/pgx/v5@v5.7.1`
+Run: `cd api && go get github.com/jackc/pgx/v5@v5.7.1 github.com/jackc/pgx/v5/pgxpool@v5.7.1`
 
 - [ ] **Step 2: Implement `api/internal/db/user_repo.go`**
 
@@ -1732,7 +1732,7 @@ func (r *userRepository) CreateUser(ctx context.Context, u *auth.User) error {
 	if err != nil {
 		return err
 	}
-	u.ID = row.ID.String()
+	u.ID = uuidToString(row.ID)
 	u.CreatedAt = row.CreatedAt.Time
 	return nil
 }
@@ -1746,13 +1746,15 @@ func (r *userRepository) GetUserByEmail(ctx context.Context, email string) (*aut
 		return nil, err
 	}
 	return &auth.User{
-		ID:           row.ID.String(),
+		ID:           uuidToString(row.ID),
 		Email:        row.Email,
 		PasswordHash: row.PasswordHash,
 		CreatedAt:    row.CreatedAt.Time,
 	}, nil
 }
 ```
+
+Note: `uuidToString` is defined in `game_repo.go` (Step 3) and used by both files within the same `db` package. `pgtype.UUID` has no `String()` method in pgx v5 (confirmed: it's `struct { Bytes [16]byte; Valid bool }`) — the helper formats the raw bytes into canonical UUID form directly.
 
 - [ ] **Step 3: Implement `api/internal/db/game_repo.go`**
 
@@ -1762,6 +1764,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -1786,6 +1789,13 @@ func parseUUID(s string) (pgtype.UUID, error) {
 	return u, err
 }
 
+// uuidToString formats a pgtype.UUID in canonical 8-4-4-4-12 form.
+// pgtype.UUID has no String method in pgx v5.
+func uuidToString(u pgtype.UUID) string {
+	b := u.Bytes
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func toDomainGame(row sqlcgen.Game) *game.Game {
 	var result *string
 	if row.Result.Valid {
@@ -1793,8 +1803,8 @@ func toDomainGame(row sqlcgen.Game) *game.Game {
 		result = &r
 	}
 	return &game.Game{
-		ID:          row.ID.String(),
-		UserID:      row.UserID.String(),
+		ID:          uuidToString(row.ID),
+		UserID:      uuidToString(row.UserID),
 		Status:      game.Status(row.Status),
 		PlayerColor: game.Color(row.PlayerColor),
 		Difficulty:  int(row.Difficulty),
@@ -1816,7 +1826,7 @@ func (r *gameRepository) CreateGame(ctx context.Context, g *game.Game) error {
 	if err != nil {
 		return err
 	}
-	g.ID = row.ID.String()
+	g.ID = uuidToString(row.ID)
 	g.CreatedAt = row.CreatedAt.Time
 	g.UpdatedAt = row.UpdatedAt.Time
 	return nil
@@ -1861,8 +1871,8 @@ func (r *gameRepository) ListMoves(ctx context.Context, gameID string) ([]*game.
 	out := make([]*game.Move, len(rows))
 	for i, row := range rows {
 		out[i] = &game.Move{
-			ID:        row.ID.String(),
-			GameID:    row.GameID.String(),
+			ID:        uuidToString(row.ID),
+			GameID:    uuidToString(row.GameID),
 			PlyNumber: int(row.PlyNumber),
 			MoveSAN:   row.MoveSan,
 			MoveUCI:   row.MoveUci,
@@ -1913,7 +1923,7 @@ func (r *gameRepository) AppendMoveAndUpdateState(ctx context.Context, m *game.M
 		return err
 	}
 
-	m.ID = row.ID.String()
+	m.ID = uuidToString(row.ID)
 	m.CreatedAt = row.CreatedAt.Time
 	return nil
 }
