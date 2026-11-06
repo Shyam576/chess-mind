@@ -26,9 +26,15 @@ func NewRouter(authSvc *auth.Service, gameSvc *game.Service, jwtSecret []byte) h
 		r.Post("/logout", ah.logout)
 	})
 
-	// The /api/games route group is added in Task 10, once gameHandler exists.
-	// gameSvc and jwtSecret are accepted here (unused for now, which is not
-	// a compile error for function parameters in Go) so this function's
-	// signature never has to change.
+	gh := &gameHandler{svc: gameSvc}
+	r.Route("/api/games", func(r chi.Router) {
+		r.Use(requireAuth(jwtSecret))
+		r.Post("/", gh.create)
+		r.Get("/", gh.list)
+		r.Get("/{id}", gh.get)
+		r.Post("/{id}/moves", gh.submitMove)
+		r.Post("/{id}/resign", gh.resign)
+	})
+
 	return r
 }
