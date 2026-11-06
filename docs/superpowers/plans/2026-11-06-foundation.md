@@ -1392,10 +1392,15 @@ func TestSubmitMove_WrongTurn(t *testing.T) {
 	repo := newMemRepo()
 	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
 	ctx := context.Background()
-	g, err := svc.CreateGame(ctx, "user-1", ColorBlack, 5)
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
 	require.NoError(t, err)
 
-	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	// Simulate an out-of-band move (e.g. a concurrent request) so the
+	// recorded ply count says it is Black's turn, even though the
+	// registered player for this game is White.
+	require.NoError(t, repo.AppendMove(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}))
+
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
 	assert.ErrorIs(t, err, ErrNotYourTurn)
 }
 
