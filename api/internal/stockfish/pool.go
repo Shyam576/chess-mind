@@ -158,6 +158,8 @@ func (p *Pool) BestMove(ctx context.Context, movesUCI []string, skillLevel int, 
 		fresh, startErr := startProcess(p.binaryPath)
 		if startErr == nil {
 			p.procs <- fresh
+		} else {
+			err = fmt.Errorf("%w (pool worker respawn also failed: %v)", err, startErr)
 		}
 		return "", err
 	}
@@ -165,6 +167,9 @@ func (p *Pool) BestMove(ctx context.Context, movesUCI []string, skillLevel int, 
 	return move, nil
 }
 
+// Close shuts down every pooled engine process. It must not be called
+// concurrently with BestMove; callers should ensure in-flight requests
+// have completed first (see Task 11's shutdown ordering).
 func (p *Pool) Close() error {
 	close(p.procs)
 	for proc := range p.procs {
