@@ -2065,6 +2065,8 @@ git commit -m "feat: implement Postgres-backed user and game repositories"
 - Create: `api/internal/httpapi/auth_handlers.go`
 - Test: `api/internal/httpapi/auth_handlers_test.go`
 
+Note: `router.go` only registers `/healthz` and `/api/auth/*` in this task. It takes a `gameSvc *game.Service` parameter (so its signature doesn't change later) but does not reference any `gameHandler` type or method yet — Task 10 modifies this file to add the `/api/games` route group once the real handler exists. There is no stub `gameHandler` in this task; one isn't needed since nothing in this task calls its methods.
+
 **Interfaces:**
 - Consumes: `auth.Service` (Task 6), `game.Service` (Task 7).
 - Produces: `func NewRouter(authSvc *auth.Service, gameSvc *game.Service, jwtSecret []byte) http.Handler`; context helper `func UserIDFromContext(ctx context.Context) (string, bool)`.
@@ -2253,7 +2255,7 @@ func (h *authHandler) logout(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 5: Write `api/internal/httpapi/router.go` (game routes registered as a no-op placeholder; filled in Task 10)**
+- [ ] **Step 5: Write `api/internal/httpapi/router.go`**
 
 ```go
 package httpapi
@@ -2284,36 +2286,15 @@ func NewRouter(authSvc *auth.Service, gameSvc *game.Service, jwtSecret []byte) h
 		r.Post("/logout", ah.logout)
 	})
 
-	gh := &gameHandler{svc: gameSvc}
-	r.Route("/api/games", func(r chi.Router) {
-		r.Use(requireAuth(jwtSecret))
-		r.Post("/", gh.create)
-		r.Get("/", gh.list)
-		r.Get("/{id}", gh.get)
-		r.Post("/{id}/moves", gh.submitMove)
-		r.Post("/{id}/resign", gh.resign)
-	})
-
+	// The /api/games route group is added in Task 10, once gameHandler exists.
+	// gameSvc and jwtSecret are accepted here (unused for now, which is not
+	// a compile error for function parameters in Go) so this function's
+	// signature never has to change.
 	return r
 }
 ```
 
-- [ ] **Step 6: Add a minimal `gameHandler` stub so the router compiles (full implementation in Task 10)**
-
-```go
-package httpapi
-
-import "net/http"
-
-type gameHandler struct {
-	svc interface {
-	}
-}
-```
-
-This stub file is `api/internal/httpapi/game_handlers_stub.go` and will be **deleted** in Task 10 when the real `gameHandler` (holding `*game.Service`) is implemented — do not test against it.
-
-- [ ] **Step 7: Write failing tests `api/internal/httpapi/auth_handlers_test.go`**
+- [ ] **Step 6: Write failing tests `api/internal/httpapi/auth_handlers_test.go`**
 
 ```go
 package httpapi
@@ -2385,12 +2366,12 @@ func TestLogin_InvalidCredentials(t *testing.T) {
 }
 ```
 
-- [ ] **Step 8: Run tests**
+- [ ] **Step 7: Run tests**
 
 Run: `cd api && go test ./internal/httpapi/... -v`
-Expected: PASS for both tests. (`gameSvc` is passed as untyped `nil` here only because Task 10 replaces the stub handler with the real one accepting `*game.Service`; these two tests never exercise game routes.)
+Expected: PASS for both tests. (`gameSvc` is passed as untyped `nil` here since `router.go` doesn't use it yet in this task; these two tests only exercise `/api/auth/*` routes.)
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add api/go.mod api/go.sum api/internal/httpapi
@@ -2402,16 +2383,15 @@ git commit -m "feat: add HTTP router, auth middleware, and auth handlers"
 ## Task 10: HTTP layer — game handlers
 
 **Files:**
-- Delete: `api/internal/httpapi/game_handlers_stub.go`
 - Create: `api/internal/httpapi/game_handlers.go`
-- Modify: `api/internal/httpapi/router.go` (no change needed if the stub's field shape matches; see Step 1)
+- Modify: `api/internal/httpapi/router.go` (add the `/api/games` route group, now that `gameHandler` exists)
 - Test: `api/internal/httpapi/game_handlers_test.go`
 
 **Interfaces:**
 - Consumes: `game.Service` (Task 7) — `CreateGame`, `GetGame`, `ListGames`, `SubmitMove`, `Resign`, and sentinel errors `ErrNotFound`, `ErrForbidden`, `ErrNotYourTurn`, `ErrGameFinished`; `chessrules.ErrIllegalMove` (Task 4).
 - Produces: fully wired `/api/games...` routes.
 
-- [ ] **Step 1: Delete the stub and write the real `api/internal/httpapi/game_handlers.go`**
+- [ ] **Step 1: Write the real `api/internal/httpapi/game_handlers.go`**
 
 ```go
 package httpapi
@@ -2593,9 +2573,45 @@ func (h *gameHandler) resign(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-- [ ] **Step 2: Delete the stub file**
+- [ ] **Step 2: Modify `api/internal/httpapi/router.go` to add the `/api/games` route group**
 
-Run: `rm api/internal/httpapi/game_handlers_stub.go`
+Replace the four-line comment block immediately before `return r` (starting `// The /api/games route group is added in Task 10...`) with:
+
+```go
+	gh := &gameHandler{svc: gameSvc}
+	r.Route("/api/games", func(r chi.Router) {
+		r.Use(requireAuth(jwtSecret))
+		r.Post("/", gh.create)
+		r.Get("/", gh.list)
+		r.Get("/{id}", gh.get)
+		r.Post("/{id}/moves", gh.submitMove)
+		r.Post("/{id}/resign", gh.resign)
+	})
+```
+
+so `NewRouter` now ends with:
+
+```go
+	ah := &authHandler{svc: authSvc}
+	r.Route("/api/auth", func(r chi.Router) {
+		r.Post("/register", ah.register)
+		r.Post("/login", ah.login)
+		r.Post("/logout", ah.logout)
+	})
+
+	gh := &gameHandler{svc: gameSvc}
+	r.Route("/api/games", func(r chi.Router) {
+		r.Use(requireAuth(jwtSecret))
+		r.Post("/", gh.create)
+		r.Get("/", gh.list)
+		r.Get("/{id}", gh.get)
+		r.Post("/{id}/moves", gh.submitMove)
+		r.Post("/{id}/resign", gh.resign)
+	})
+
+	return r
+}
+```
 
 - [ ] **Step 3: Write failing tests `api/internal/httpapi/game_handlers_test.go`**
 
