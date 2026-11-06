@@ -60,6 +60,31 @@ func TestApplyMove_SequenceAndCheckmate(t *testing.T) {
 	if last.Result == nil || *last.Result != "0-1" {
 		t.Errorf("Result = %v, want \"0-1\"", last.Result)
 	}
+	if last.SAN != "Qh4#" {
+		t.Errorf("SAN = %q, want %q", last.SAN, "Qh4#")
+	}
+}
+
+func TestApplyMove_SANIncludesCheck(t *testing.T) {
+	// 1. e4 d5 2. Bb5+ checks the king directly out of the opening.
+	moves := [][3]string{
+		{"e2", "e4", ""},
+		{"d7", "d5", ""},
+		{"f1", "b5", ""},
+	}
+	var prior []string
+	var last MoveResult
+	for _, m := range moves {
+		res, err := ApplyMove(prior, m[0], m[1], m[2])
+		if err != nil {
+			t.Fatalf("move %v failed: %v", m, err)
+		}
+		prior = append(prior, res.UCI)
+		last = res
+	}
+	if last.SAN != "Bb5+" {
+		t.Errorf("SAN = %q, want %q", last.SAN, "Bb5+")
+	}
 }
 
 func TestApplyMove_Castling(t *testing.T) {

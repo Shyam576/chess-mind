@@ -62,11 +62,15 @@ func ApplyMove(priorMovesUCI []string, from, to, promotion string) (MoveResult, 
 		return MoveResult{}, ErrIllegalMove
 	}
 
-	san := chess.AlgebraicNotation{}.Encode(pos, move)
-
 	if err := game.Move(move); err != nil {
 		return MoveResult{}, ErrIllegalMove
 	}
+
+	// Encode SAN from the move as recorded in the game's history, not the
+	// bare decoded move — only the former carries the check (+) / mate (#)
+	// suffix, which notnil/chess computes during game.Move.
+	history := game.Moves()
+	san := chess.AlgebraicNotation{}.Encode(pos, history[len(history)-1])
 
 	status, result := statusFromGame(game)
 	turn := "white"
