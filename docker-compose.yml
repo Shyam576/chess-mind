@@ -16,5 +16,18 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build: ./api
+    environment:
+      DATABASE_URL: postgres://chessmind:chessmind@postgres:5432/chessmind?sslmode=disable
+      JWT_SECRET: dev-secret-change-me
+      PORT: "8080"
+      STOCKFISH_POOL_SIZE: "4"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
