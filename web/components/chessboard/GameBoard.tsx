@@ -83,6 +83,7 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
         <Chessboard
           position={chessInstance.fen()}
           onPieceDrop={onDrop}
+          onPromotionCheck={() => false}
           boardOrientation={game.player_color}
           arePiecesDraggable={!isGameOver && !thinking}
           showPromotionDialog={false}
