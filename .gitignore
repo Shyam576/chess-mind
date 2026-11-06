@@ -1,0 +1,15 @@
+# Go
+/api/tmp/
+*.test
+
+# Node
+/web/node_modules/
+/web/.next/
+/web/.turbo/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
