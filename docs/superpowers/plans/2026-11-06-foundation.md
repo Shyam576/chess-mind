@@ -1208,7 +1208,7 @@ git commit -m "feat: add auth domain with bcrypt hashing, JWT issuing, and regis
   - `type Color string` with `ColorWhite`, `ColorBlack`.
   - `type Game struct { ID, UserID string; Status Status; PlayerColor Color; Difficulty int; CurrentFEN string; Result *string; CreatedAt, UpdatedAt time.Time }`
   - `type Move struct { ID, GameID string; PlyNumber int; MoveSAN, MoveUCI, FENAfter string; CreatedAt time.Time }`
-  - `type Repository interface { CreateGame, GetGame, ListGamesByUser, ListMoves, AppendMove, UpdateGameState }` (exact signatures below)
+  - `type Repository interface { CreateGame, GetGame, ListGamesByUser, ListMoves, AppendMoveAndUpdateState, UpdateGameState }` (exact signatures below). `AppendMoveAndUpdateState` persists a move and the game's resulting state together (atomically, in the real Postgres implementation) so a move is never recorded without its corresponding game-state update — see the project's transaction rules. `UpdateGameState` alone remains for single-table updates (resignation).
   - `var ErrNotFound, ErrForbidden, ErrNotYourTurn, ErrGameFinished error`
   - `type MoveRequest struct { From, To, Promotion string }`
   - `type Service struct{...}`, `func NewService(repo Repository, engine stockfish.Engine) *Service`
@@ -1279,7 +1279,10 @@ type Repository interface {
 	GetGame(ctx context.Context, id string) (*Game, error)
 	ListGamesByUser(ctx context.Context, userID string, limit, offset int) ([]*Game, error)
 	ListMoves(ctx context.Context, gameID string) ([]*Move, error)
-	AppendMove(ctx context.Context, m *Move) error
+	// AppendMoveAndUpdateState atomically records a move and the game's
+	// resulting state together, so a move is never persisted without its
+	// corresponding game-state update (or vice versa) if either write fails.
+	AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error
 	UpdateGameState(ctx context.Context, id string, fen string, status Status, result *string) error
 }
 ```
@@ -1351,8 +1354,12 @@ func (r *memRepo) ListMoves(ctx context.Context, gameID string) ([]*Move, error)
 	return r.moves[gameID], nil
 }
 
-func (r *memRepo) AppendMove(ctx context.Context, m *Move) error {
+func (r *memRepo) AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error {
 	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
 	return nil
 }
 
@@ -1398,7 +1405,7 @@ func TestSubmitMove_WrongTurn(t *testing.T) {
 	// Simulate an out-of-band move (e.g. a concurrent request) so the
 	// recorded ply count says it is Black's turn, even though the
 	// registered player for this game is White.
-	require.NoError(t, repo.AppendMove(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}))
+	require.NoError(t, repo.AppendMoveAndUpdateState(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}, g.CurrentFEN, StatusInProgress, nil))
 
 	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
 	assert.ErrorIs(t, err, ErrNotYourTurn)
@@ -1454,6 +1461,7 @@ package game
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -1486,7 +1494,7 @@ func (s *Service) CreateGame(ctx context.Context, userID string, color Color, di
 		return nil, err
 	}
 	if color == ColorBlack {
-		if _, _, err := s.playBotMove(ctx, g, nil); err != nil {
+		if _, err := s.playBotMove(ctx, g, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -1568,12 +1576,8 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, playerMove); err != nil {
-		return nil, nil, err
-	}
-
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, gameID, result.FEN, newStatus, result.Result); err != nil {
+	if err := s.repo.AppendMoveAndUpdateState(ctx, playerMove, result.FEN, newStatus, result.Result); err != nil {
 		return nil, nil, err
 	}
 	g.CurrentFEN = result.FEN
@@ -1582,28 +1586,31 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 
 	newMoves := []*Move{playerMove}
 	if g.Status == StatusInProgress {
-		botMove, moves, err := s.playBotMove(ctx, g, append(prior, result.UCI))
+		botMove, err := s.playBotMove(ctx, g, append(prior, result.UCI))
 		if err != nil {
 			return nil, nil, err
 		}
 		if botMove != nil {
 			newMoves = append(newMoves, botMove)
 		}
-		_ = moves
 	}
 
 	return g, newMoves, nil
 }
 
-// playBotMove asks the engine for a move in the current position (priorUCI) and
-// applies it, mutating g in place and persisting the move and updated game state.
-// priorUCI is nil when the bot must play first (player chose black).
-func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, []string, error) {
+// playBotMove asks the engine for a move in the current position (priorUCI),
+// applies it, and atomically persists the move together with the resulting
+// game state. It mutates g in place to reflect the new state. priorUCI is nil
+// when the bot must play first (player chose black).
+func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, error) {
 	skillLevel := g.Difficulty
 	moveTime := 500 * time.Millisecond
 	best, err := s.engine.BestMove(ctx, priorUCI, skillLevel, moveTime)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	if len(best) < 4 {
+		return nil, fmt.Errorf("engine returned malformed move: %q", best)
 	}
 
 	from, to, promotion := best[0:2], best[2:4], ""
@@ -1613,12 +1620,12 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 
 	result, err := chessrules.ApplyMove(priorUCI, from, to, promotion)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	existing, err := s.repo.ListMoves(ctx, g.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	botMove := &Move{
@@ -1630,19 +1637,16 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, botMove); err != nil {
-		return nil, nil, err
-	}
 
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, g.ID, result.FEN, newStatus, result.Result); err != nil {
-		return nil, nil, err
+	if err := s.repo.AppendMoveAndUpdateState(ctx, botMove, result.FEN, newStatus, result.Result); err != nil {
+		return nil, err
 	}
 	g.CurrentFEN = result.FEN
 	g.Status = newStatus
 	g.Result = result.Result
 
-	return botMove, append(priorUCI, result.UCI), nil
+	return botMove, nil
 }
 
 func (s *Service) Resign(ctx context.Context, userID, gameID string) (*Game, error) {
@@ -1691,7 +1695,7 @@ git commit -m "feat: add game domain service orchestrating chess rules, Stockfis
 
 **Interfaces:**
 - Consumes: `sqlcgen.Queries` (Task 3), `auth.UserRepository`, `game.Repository` (Tasks 6, 7).
-- Produces: `func NewUserRepository(q *sqlcgen.Queries) auth.UserRepository`, `func NewGameRepository(q *sqlcgen.Queries) game.Repository`.
+- Produces: `func NewUserRepository(q *sqlcgen.Queries) auth.UserRepository`, `func NewGameRepository(pool *pgxpool.Pool) game.Repository`. `NewGameRepository` takes the pool directly (not a pre-bound `*sqlcgen.Queries`) because `AppendMoveAndUpdateState` needs to start its own transaction — `game.Repository`'s move-write path must be atomic per the project's transaction rules (see Task 7).
 
 - [ ] **Step 1: Add pgx dependency**
 
@@ -1761,17 +1765,19 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Shyam576/chess-mind/api/internal/db/sqlcgen"
 	"github.com/Shyam576/chess-mind/api/internal/game"
 )
 
 type gameRepository struct {
-	q *sqlcgen.Queries
+	pool *pgxpool.Pool
+	q    *sqlcgen.Queries
 }
 
-func NewGameRepository(q *sqlcgen.Queries) game.Repository {
-	return &gameRepository{q: q}
+func NewGameRepository(pool *pgxpool.Pool) game.Repository {
+	return &gameRepository{pool: pool, q: sqlcgen.New(pool)}
 }
 
 func parseUUID(s string) (pgtype.UUID, error) {
@@ -1867,8 +1873,19 @@ func (r *gameRepository) ListMoves(ctx context.Context, gameID string) ([]*game.
 	return out, nil
 }
 
-func (r *gameRepository) AppendMove(ctx context.Context, m *game.Move) error {
-	row, err := r.q.AppendMove(ctx, sqlcgen.AppendMoveParams{
+// AppendMoveAndUpdateState persists the move and the game's resulting state
+// in a single transaction: if either write fails, both are rolled back, so a
+// move is never recorded without its corresponding game-state update.
+func (r *gameRepository) AppendMoveAndUpdateState(ctx context.Context, m *game.Move, fen string, status game.Status, result *string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	txQueries := sqlcgen.New(tx)
+
+	row, err := txQueries.AppendMove(ctx, sqlcgen.AppendMoveParams{
 		GameID:    mustUUID(m.GameID),
 		PlyNumber: int32(m.PlyNumber),
 		MoveSan:   m.MoveSAN,
@@ -1878,6 +1895,24 @@ func (r *gameRepository) AppendMove(ctx context.Context, m *game.Move) error {
 	if err != nil {
 		return err
 	}
+
+	var pgResult pgtype.Text
+	if result != nil {
+		pgResult = pgtype.Text{String: *result, Valid: true}
+	}
+	if err := txQueries.UpdateGameState(ctx, sqlcgen.UpdateGameStateParams{
+		ID:         mustUUID(m.GameID),
+		CurrentFen: fen,
+		Status:     string(status),
+		Result:     pgResult,
+	}); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+
 	m.ID = row.ID.String()
 	m.CreatedAt = row.CreatedAt.Time
 	return nil
@@ -1957,7 +1992,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 	pool := testPool(t)
 	q := sqlcgen.New(pool)
 	userRepo := NewUserRepository(q)
-	gameRepo := NewGameRepository(q)
+	gameRepo := NewGameRepository(pool)
 	ctx := context.Background()
 
 	email := "repo-game-test-" + time.Now().Format("150405.000000") + "@example.com"
@@ -1975,7 +2010,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 	require.NotEmpty(t, g.ID)
 
 	m := &game.Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: "fen-after"}
-	require.NoError(t, gameRepo.AppendMove(ctx, m))
+	require.NoError(t, gameRepo.AppendMoveAndUpdateState(ctx, m, "fen-after", game.StatusInProgress, nil))
 
 	moves, err := gameRepo.ListMoves(ctx, g.ID)
 	require.NoError(t, err)
@@ -2605,8 +2640,12 @@ func (r *memGameRepo) ListGamesByUser(ctx context.Context, userID string, limit,
 func (r *memGameRepo) ListMoves(ctx context.Context, gameID string) ([]*game.Move, error) {
 	return r.moves[gameID], nil
 }
-func (r *memGameRepo) AppendMove(ctx context.Context, m *game.Move) error {
+func (r *memGameRepo) AppendMoveAndUpdateState(ctx context.Context, m *game.Move, fen string, status game.Status, result *string) error {
 	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
 	return nil
 }
 func (r *memGameRepo) UpdateGameState(ctx context.Context, id string, fen string, status game.Status, result *string) error {
@@ -2845,7 +2884,7 @@ func main() {
 
 	queries := sqlcgen.New(pool)
 	userRepo := db.NewUserRepository(queries)
-	gameRepo := db.NewGameRepository(queries)
+	gameRepo := db.NewGameRepository(pool)
 
 	enginePool, err := stockfish.NewPool(cfg.StockfishPath, cfg.StockfishPoolSize)
 	if err != nil {
