@@ -3102,8 +3102,10 @@ Run (`CI=1` forces the CLI to use its recommended defaults for anything not expl
 CI=1 npx --yes create-next-app@14 web --typescript --tailwind --eslint --app --no-src-dir --import-alias "@/*" --use-npm
 cd web
 npm install @tanstack/react-query chess.js react-chessboard
-npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react
+npm install -D vitest @testing-library/react @testing-library/jest-dom jsdom @vitejs/plugin-react@^5.2.0 vite@^7.3.7
 ```
+
+`@vitejs/plugin-react` and `vite` are pinned explicitly (not left to resolve to their unqualified latest versions) because of a confirmed, verified npm dependency-resolution issue: the unqualified `@vitejs/plugin-react` resolves to v6.x, which only supports Vite 8 — but `vitest`'s own internal dependency is Vite 7, and having two different major Vite versions present causes both a runtime JSX-transform failure (`ReferenceError: React is not defined` in tests) and a TypeScript type error in `vitest.config.ts` (`No overload matches this call`, from two incompatible `Plugin<any>` type definitions). `@vitejs/plugin-react@^5.2.0`'s peer range includes Vite 7, and adding `vite@^7.3.7` as an explicit top-level devDependency forces npm to fully deduplicate every nested copy to the same Vite 7.3.7 install — verified directly: `npx tsc --noEmit` reports zero errors and `npm test`/`npm run build` both pass cleanly with this combination.
 
 If the command still appears to hang waiting for input despite `CI=1`, it is prompting for something not covered by the flags above — check the printed prompt text, answer it once to see what option it needs, then add the matching flag (or its `--no-` negation) to this command for next time and report what was missing.
 
@@ -3481,6 +3483,8 @@ export default function RegisterPage() {
 
 - [ ] **Step 6: Write failing test `web/app/login/page.test.tsx`**
 
+Note: mocks use `vi.mocked(global.fetch)` (typed) rather than `(global.fetch as any)` — the project's ESLint config (from `create-next-app --eslint`) flags `@typescript-eslint/no-explicit-any` as an error, which fails `next build`'s lint step. The minimal mock response objects are cast `as Response` (a legitimate, narrow type assertion — not `any`) since they don't implement every `Response` interface member.
+
 ```tsx
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -3496,11 +3500,11 @@ describe("LoginPage", () => {
   });
 
   it("redirects to /play on successful login", async () => {
-    (global.fetch as any).mockResolvedValue({
+    vi.mocked(global.fetch).mockResolvedValue({
       ok: true,
       status: 200,
       json: async () => ({ id: "1", email: "a@example.com" }),
-    });
+    } as Response);
 
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "a@example.com" } });
@@ -3511,11 +3515,11 @@ describe("LoginPage", () => {
   });
 
   it("shows an error message on invalid credentials", async () => {
-    (global.fetch as any).mockResolvedValue({
+    vi.mocked(global.fetch).mockResolvedValue({
       ok: false,
       status: 401,
       json: async () => ({ error: { code: "invalid_credentials", message: "Incorrect email or password" } }),
-    });
+    } as Response);
 
     render(<LoginPage />);
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: "a@example.com" } });
@@ -3527,10 +3531,13 @@ describe("LoginPage", () => {
 });
 ```
 
-- [ ] **Step 7: Run tests**
+- [ ] **Step 7: Run tests and verify the production build still succeeds**
 
 Run: `cd web && npm test`
 Expected: both `LoginPage` tests PASS.
+
+Also run: `npm run build`
+Expected: succeeds cleanly (Next.js's build lints the whole project, including test files, and fails on lint errors — this is how the `no-explicit-any` issue above was originally caught).
 
 - [ ] **Step 8: Commit**
 
