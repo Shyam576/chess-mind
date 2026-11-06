@@ -75,8 +75,26 @@ func handleServiceError(w http.ResponseWriter, err error) {
 	}
 }
 
+// userIDOrUnauthorized reads the authenticated user ID from context, writing
+// a 401 and returning ok=false if it's missing. Every route in this handler
+// goes through requireAuth, which always sets this, but each handler checks
+// anyway rather than trusting that invariant silently — if a route were ever
+// mounted outside that middleware, an empty userID must never reach the
+// service layer.
+func userIDOrUnauthorized(w http.ResponseWriter, r *http.Request) (string, bool) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthenticated", "missing session")
+		return "", false
+	}
+	return userID, true
+}
+
 func (h *gameHandler) create(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	var req createGameRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_body", "request body must be valid JSON")
@@ -100,7 +118,10 @@ func (h *gameHandler) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) list(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	limit, offset := 20, 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
@@ -125,7 +146,10 @@ func (h *gameHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) get(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	g, moves, err := h.svc.GetGame(r.Context(), userID, id)
 	if err != nil {
@@ -145,7 +169,10 @@ type submitMoveRequest struct {
 }
 
 func (h *gameHandler) submitMove(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	var req submitMoveRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -168,7 +195,10 @@ func (h *gameHandler) submitMove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *gameHandler) resign(w http.ResponseWriter, r *http.Request) {
-	userID, _ := UserIDFromContext(r.Context())
+	userID, ok := userIDOrUnauthorized(w, r)
+	if !ok {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	g, err := h.svc.Resign(r.Context(), userID, id)
 	if err != nil {
