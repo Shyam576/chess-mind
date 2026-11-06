@@ -2939,6 +2939,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("opening migration connection: %v", err)
 	}
+	if err := goose.SetDialect("postgres"); err != nil {
+		log.Fatalf("setting goose dialect: %v", err)
+	}
 	if err := goose.Up(migrationDB, "internal/db/migrations"); err != nil {
 		log.Fatalf("running migrations: %v", err)
 	}
