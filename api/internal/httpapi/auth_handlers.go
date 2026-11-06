@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
@@ -34,6 +35,7 @@ func (h *authHandler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "user_exists", "an account with that email already exists")
 			return
 		}
+		log.Printf("register: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "could not register user")
 		return
 	}
@@ -53,7 +55,12 @@ func (h *authHandler) login(w http.ResponseWriter, r *http.Request) {
 	}
 	token, u, err := h.svc.Login(r.Context(), req.Email, req.Password)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "incorrect email or password")
+			return
+		}
+		log.Printf("login: %v", err)
+		writeError(w, http.StatusInternalServerError, "internal_error", "could not log in")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
