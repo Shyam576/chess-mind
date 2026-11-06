@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -90,7 +91,9 @@ func TestSubmitMove_PlayerThenBotReply(t *testing.T) {
 
 func TestSubmitMove_WrongTurn(t *testing.T) {
 	repo := newMemRepo()
-	svc := NewService(repo, &stockfish.StubEngine{Move: "e7e5"})
+	// The engine is down so the self-heal attempt cannot play the bot's
+	// move; the turn guard must still reject the player's move.
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("engine unavailable")})
 	ctx := context.Background()
 	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
 	require.NoError(t, err)
@@ -102,6 +105,65 @@ func TestSubmitMove_WrongTurn(t *testing.T) {
 
 	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
 	assert.ErrorIs(t, err, ErrNotYourTurn)
+}
+
+func TestSubmitMove_SelfHealsAfterBotFailure(t *testing.T) {
+	repo := newMemRepo()
+	failing := &stockfish.StubEngine{Err: errors.New("engine unavailable")}
+	svc := NewService(repo, failing)
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+
+	// The bot's reply fails, but the player's own move must still succeed.
+	updated, moves, err := svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	require.NoError(t, err)
+	require.Len(t, moves, 1)
+	assert.Equal(t, "e4", moves[0].MoveSAN)
+	assert.Equal(t, StatusInProgress, updated.Status)
+
+	// The game is now stuck on the bot's turn. Fix the engine and retry: the
+	// next submit must self-heal (play the missed bot reply) and then also
+	// apply the player's new move.
+	svc.engine = &stockfish.StubEngine{Move: "e7e5"}
+	updated, moves, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "g1", To: "f3"})
+	require.NoError(t, err)
+	// Healed e7e5 reply, then Nf3. The stub's fixed "e7e5" is illegal as the
+	// bot's follow-up reply, so that trailing reply fails and is not included.
+	require.Len(t, moves, 2)
+	assert.Equal(t, "e5", moves[0].MoveSAN)
+	assert.Equal(t, "Nf3", moves[1].MoveSAN)
+	assert.Equal(t, StatusInProgress, updated.Status)
+}
+
+func TestGetGame_SelfHealsStuckBotTurn(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("down")})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorWhite, 5)
+	require.NoError(t, err)
+	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "e2", To: "e4"})
+	require.NoError(t, err) // bot reply fails silently, player's move still recorded
+
+	svc.engine = &stockfish.StubEngine{Move: "e7e5"}
+	_, moves, err := svc.GetGame(ctx, "user-1", g.ID)
+	require.NoError(t, err)
+	require.Len(t, moves, 2)
+	assert.Equal(t, "e5", moves[1].MoveSAN)
+}
+
+func TestCreateGame_BlackSucceedsWhenEngineDown(t *testing.T) {
+	repo := newMemRepo()
+	svc := NewService(repo, &stockfish.StubEngine{Err: errors.New("down")})
+	ctx := context.Background()
+	g, err := svc.CreateGame(ctx, "user-1", ColorBlack, 5)
+	require.NoError(t, err) // the game row exists; the opening move is healed later
+
+	svc.engine = &stockfish.StubEngine{Move: "e2e4"}
+	_, moves, err := svc.GetGame(ctx, "user-1", g.ID)
+	require.NoError(t, err)
+	require.Len(t, moves, 1)
+	assert.Equal(t, "e4", moves[0].MoveSAN)
 }
 
 func TestSubmitMove_NotOwner(t *testing.T) {

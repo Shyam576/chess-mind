@@ -3,6 +3,7 @@ package game
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/google/uuid"
@@ -10,6 +11,19 @@ import (
 	"github.com/Shyam576/chess-mind/api/internal/chessrules"
 	"github.com/Shyam576/chess-mind/api/internal/stockfish"
 )
+
+// botMoveTimeout bounds how long we wait for the engine, independent of the
+// inbound HTTP request's lifetime.
+const botMoveTimeout = 5 * time.Second
+
+// detachedMoveCtx returns a context that is not canceled when the inbound
+// request ends. An engine call must be allowed to finish even if the client
+// disconnects — otherwise the game is left on the bot's turn with nothing to
+// trigger it. It carries its own timeout so a hung engine can't block the
+// caller forever.
+func detachedMoveCtx(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), botMoveTimeout)
+}
 
 type Service struct {
 	repo   Repository
@@ -34,11 +48,7 @@ func (s *Service) CreateGame(ctx context.Context, userID string, color Color, di
 	if err := s.repo.CreateGame(ctx, g); err != nil {
 		return nil, err
 	}
-	if color == ColorBlack {
-		if _, err := s.playBotMove(ctx, g, nil); err != nil {
-			return nil, err
-		}
-	}
+	s.healBotTurn(ctx, g, nil)
 	return g, nil
 }
 
@@ -53,6 +63,9 @@ func (s *Service) GetGame(ctx context.Context, userID, gameID string) (*Game, []
 	moves, err := s.repo.ListMoves(ctx, gameID)
 	if err != nil {
 		return nil, nil, err
+	}
+	if healed := s.healBotTurn(ctx, g, moves); healed != nil {
+		moves = append(moves, healed)
 	}
 	return g, moves, nil
 }
@@ -98,6 +111,16 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 	if err != nil {
 		return nil, nil, err
 	}
+
+	var newMoves []*Move
+	if healed := s.healBotTurn(ctx, g, existing); healed != nil {
+		existing = append(existing, healed)
+		newMoves = append(newMoves, healed)
+	}
+
+	if g.Status != StatusInProgress {
+		return nil, nil, ErrGameFinished
+	}
 	if plyColor(len(existing)) != g.PlayerColor {
 		return nil, nil, ErrNotYourTurn
 	}
@@ -124,19 +147,40 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 	g.CurrentFEN = result.FEN
 	g.Status = newStatus
 	g.Result = result.Result
+	newMoves = append(newMoves, playerMove)
 
-	newMoves := []*Move{playerMove}
 	if g.Status == StatusInProgress {
-		botMove, err := s.playBotMove(ctx, g, append(prior, result.UCI))
+		botCtx, cancel := detachedMoveCtx(ctx)
+		botMove, err := s.playBotMove(botCtx, g, append(prior, result.UCI))
+		cancel()
 		if err != nil {
-			return nil, nil, err
-		}
-		if botMove != nil {
+			log.Printf("game: bot reply failed for game %s, will self-heal on next access: %v", g.ID, err)
+		} else if botMove != nil {
 			newMoves = append(newMoves, botMove)
 		}
 	}
 
 	return g, newMoves, nil
+}
+
+// healBotTurn plays the bot's move if the stored state says it's the bot's
+// turn — the signature of a bot reply that failed after the opponent ply was
+// already committed. It mutates g in place when it plays a move, and returns
+// the move it played (nil if none was needed or the attempt failed; a
+// failure here is logged and left for the next call to retry, it never
+// fails the caller's own operation).
+func (s *Service) healBotTurn(ctx context.Context, g *Game, moves []*Move) *Move {
+	if g.Status != StatusInProgress || plyColor(len(moves)) == g.PlayerColor {
+		return nil
+	}
+	botCtx, cancel := detachedMoveCtx(ctx)
+	defer cancel()
+	botMove, err := s.playBotMove(botCtx, g, uciList(moves))
+	if err != nil {
+		log.Printf("game: self-heal bot move failed for game %s: %v", g.ID, err)
+		return nil
+	}
+	return botMove
 }
 
 // playBotMove asks the engine for a move in the current position (priorUCI),
