@@ -77,7 +77,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -90,7 +90,7 @@ volumes:
   pgdata:
 ```
 
-Host port `5434` (not the default `5432`) is used because `5432` and `5433` may already be bound by other Postgres instances on the development machine; the container still listens on `5432` internally, so container-to-container traffic (the `api` service's `DATABASE_URL`, added in Task 11) is unaffected.
+Host port `5434` (not the default `5432`) is used because `5432` and `5433` may already be bound by other Postgres instances on the development machine; the container still listens on `5432` internally, so container-to-container traffic (the `api` service's `DATABASE_URL`, added in Task 11) is unaffected. The mapping is bound to `127.0.0.1` only (not `0.0.0.0`) so this dev database with well-known credentials isn't reachable from the LAN.
 
 - [ ] **Step 4: Verify Postgres starts**
 
@@ -2907,7 +2907,7 @@ services:
       POSTGRES_PASSWORD: chessmind
       POSTGRES_DB: chessmind
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
