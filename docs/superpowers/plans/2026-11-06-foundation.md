@@ -672,8 +672,7 @@ package stockfish
 
 import (
 	"context"
-	"os/exec"
-	"strings"
+	"os"
 	"testing"
 	"time"
 )
@@ -694,18 +693,10 @@ func writeFakeEngine(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	path := dir + "/fake-engine.sh"
-	if err := exec.Command("sh", "-c", "cat > "+path).Run(); err != nil {
-		t.Skip("sh not available to build fake engine script")
-	}
-	f, err := exec.Command("sh", "-c", "printf '%s' "+quote(fakeEngineScript)+" > "+path+" && chmod +x "+path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("failed to write fake engine: %v (%s)", err, f)
+	if err := os.WriteFile(path, []byte(fakeEngineScript), 0o755); err != nil {
+		t.Fatalf("failed to write fake engine: %v", err)
 	}
 	return path
-}
-
-func quote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func TestPool_BestMove(t *testing.T) {
