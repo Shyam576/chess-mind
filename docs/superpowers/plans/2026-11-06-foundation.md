@@ -3305,7 +3305,7 @@ git commit -m "feat: scaffold Next.js frontend with Tailwind, React Query, and A
 - [ ] **Step 1: Write `web/vitest.config.ts`**
 
 ```typescript
-import { defineConfig } from "vitest/config";
+import { defineConfig, configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 import path from "path";
 
@@ -3316,9 +3316,12 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./vitest.setup.ts"],
     globals: true,
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });
 ```
+
+Note: `exclude` here is forward-looking — at this point in the plan `web/e2e/` doesn't exist yet (Task 17 creates it), but Vitest's default test-file glob would otherwise also match a `*.spec.ts` file under `e2e/` later and try to run it with Vitest's own runner, which conflicts with Playwright's test registration (`@playwright/test`'s `test()` throws "did not expect test() to be called here" when invoked outside Playwright's own runner). Confirmed by actually running `npm test` against the real `e2e/golden-path.spec.ts` from Task 17 — it fails without this exclusion and passes cleanly with it.
 
 - [ ] **Step 2: Write `web/vitest.setup.ts`**
 
@@ -4320,6 +4323,8 @@ A chess application: play against an adjustable Stockfish opponent, with the Go 
 2. `docker compose up -d --build` — starts Postgres, the Go API (migrations run automatically on boot), and the Next.js frontend.
 3. Visit `http://localhost:3001`.
 
+Host ports (`5434` for Postgres, `8081` for the API, `3001` for the frontend) are intentionally non-default — `5432`/`8080`/`3000` were already in use by unrelated processes on the machine this was built and verified on. Each service's container-internal port is unchanged (`5432`, `8080`, `3000` respectively); only the host-side mapping differs. Edit the `ports:` entries in `docker-compose.yml` if you'd prefer the conventional defaults and they're free on your machine.
+
 ## Running tests
 
 Backend:
@@ -4346,6 +4351,7 @@ npx playwright test   # end-to-end golden path (requires the full stack running)
 | `PORT` | api | HTTP port (default 8080) |
 | `STOCKFISH_PATH` | api | Path to the Stockfish binary |
 | `STOCKFISH_POOL_SIZE` | api | Number of long-lived engine processes |
+| `CORS_ALLOWED_ORIGIN` | api | Frontend origin allowed to make credentialed cross-origin requests (default `http://localhost:3001`) |
 | `NEXT_PUBLIC_API_URL` | web | Base URL the frontend calls |
 
 ## Known limitations (by design, this slice)
@@ -4372,5 +4378,6 @@ Expected: Go build and tests pass; frontend build and Vitest tests pass; health 
 ```bash
 git add README.md
 git commit -m "docs: add README with setup, env vars, and test instructions"
-git push
 ```
+
+Do not push. This is the last task of the Foundation implementation plan — pushing (and deciding whether/how to merge this feature branch) is a separate decision made via the finishing-a-development-branch process after the final whole-branch review, not a routine step of this task.
