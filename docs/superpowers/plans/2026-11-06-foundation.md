@@ -3791,6 +3791,7 @@ export function PromotionDialog({
 
 import { useMemo, useState } from "react";
 import { Chess } from "chess.js";
+import type { Square } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { apiFetch, ApiError } from "@/lib/api-client";
 import type { GameResponse, GameWithMoves, MoveResponse } from "@/lib/types";
@@ -3836,10 +3837,7 @@ export function GameBoard({ initial }: { initial: GameWithMoves }) {
     // (it has its own verbose move list); the backend independently
     // re-validates and is authoritative for legality.
     const probe = new Chess(game.current_fen);
-    const candidates = probe.moves({ square: sourceSquare, verbose: true }) as {
-      to: string;
-      promotion?: string;
-    }[];
+    const candidates = probe.moves({ square: sourceSquare as Square, verbose: true });
     const match = candidates.find((m) => m.to === targetSquare);
     if (!match) {
       return false;
