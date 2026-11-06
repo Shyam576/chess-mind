@@ -14,6 +14,7 @@ func NewRouter(authSvc *auth.Service, gameSvc *game.Service, jwtSecret []byte) h
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(recoverMiddleware)
+	r.Use(corsMiddleware)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

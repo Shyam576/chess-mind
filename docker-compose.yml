@@ -29,5 +29,15 @@ services:
       postgres:
         condition: service_healthy
 
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8081
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+
 volumes:
   pgdata:
