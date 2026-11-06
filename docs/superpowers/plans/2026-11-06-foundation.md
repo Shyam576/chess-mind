@@ -734,6 +734,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 	"sync"
@@ -741,10 +742,11 @@ import (
 )
 
 type process struct {
-	cmd    *exec.Cmd
-	stdin  *bufio.Writer
-	stdout *bufio.Scanner
-	mu     sync.Mutex
+	cmd       *exec.Cmd
+	stdinPipe io.WriteCloser
+	stdin     *bufio.Writer
+	stdout    *bufio.Scanner
+	mu        sync.Mutex
 }
 
 func startProcess(binaryPath string) (*process, error) {
@@ -761,9 +763,10 @@ func startProcess(binaryPath string) (*process, error) {
 		return nil, err
 	}
 	p := &process{
-		cmd:    cmd,
-		stdin:  bufio.NewWriter(stdin),
-		stdout: bufio.NewScanner(stdout),
+		cmd:       cmd,
+		stdinPipe: stdin,
+		stdin:     bufio.NewWriter(stdin),
+		stdout:    bufio.NewScanner(stdout),
 	}
 	if err := p.send("uci"); err != nil {
 		return nil, err
@@ -844,6 +847,9 @@ func (p *process) bestMove(ctx context.Context, movesUCI []string, skillLevel in
 
 func (p *process) close() error {
 	_ = p.send("quit")
+	// Closing stdin ends the engine's input loop even if it ignores "quit";
+	// without this, cmd.Wait would block forever on such an engine.
+	_ = p.stdinPipe.Close()
 	return p.cmd.Wait()
 }
 
