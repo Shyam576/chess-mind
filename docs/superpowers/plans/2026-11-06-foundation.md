@@ -57,7 +57,7 @@
 - [ ] **Step 2: Write `.env.example`**
 
 ```bash
-DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
+DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 JWT_SECRET=dev-secret-change-me
 PORT=8080
 STOCKFISH_PATH=/usr/games/stockfish
@@ -216,7 +216,7 @@ Run:
 ```bash
 cd api
 go install github.com/pressly/goose/v3/cmd/goose@v3.21.1
-export DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
+export DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 make migrate-up
 docker compose exec postgres psql -U chessmind -d chessmind -c '\dt'
 ```
@@ -1991,7 +1991,7 @@ func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {
 Run:
 ```bash
 cd api
-export TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable
+export TEST_DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable
 go build ./...
 go test ./internal/db/... -v
 ```
@@ -4108,7 +4108,7 @@ Backend:
 ```bash
 cd api
 go test ./...                                   # unit tests only
-TEST_DATABASE_URL=postgres://chessmind:chessmind@localhost:5434/chessmind?sslmode=disable \
+TEST_DATABASE_URL=postgres://chessmind:chessmind@127.0.0.1:5434/chessmind?sslmode=disable \
   go test ./internal/db/... -v                   # + repository integration tests
 ```
 
