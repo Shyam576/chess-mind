@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -39,6 +40,19 @@ func TestUserRepository_CreateAndGet(t *testing.T) {
 	fetched, err := repo.GetUserByEmail(context.Background(), email)
 	require.NoError(t, err)
 	require.Equal(t, u.ID, fetched.ID)
+}
+
+func TestUserRepository_DuplicateEmailReturnsErrUserExists(t *testing.T) {
+	pool := testPool(t)
+	q := sqlcgen.New(pool)
+	repo := NewUserRepository(q)
+	ctx := context.Background()
+
+	email := "repo-dup-test-" + time.Now().Format("150405.000000") + "@example.com"
+	require.NoError(t, repo.CreateUser(ctx, &auth.User{Email: email, PasswordHash: "hash"}))
+
+	err := repo.CreateUser(ctx, &auth.User{Email: email, PasswordHash: "hash"})
+	require.True(t, errors.Is(err, auth.ErrUserExists), "want auth.ErrUserExists, got %v", err)
 }
 
 func TestGameRepository_CreateMoveAndUpdate(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Shyam576/chess-mind/api/internal/auth"
 	"github.com/Shyam576/chess-mind/api/internal/db/sqlcgen"
@@ -18,12 +19,18 @@ func NewUserRepository(q *sqlcgen.Queries) auth.UserRepository {
 	return &userRepository{q: q}
 }
 
+const pgUniqueViolation = "23505"
+
 func (r *userRepository) CreateUser(ctx context.Context, u *auth.User) error {
 	row, err := r.q.CreateUser(ctx, sqlcgen.CreateUserParams{
 		Email:        u.Email,
 		PasswordHash: u.PasswordHash,
 	})
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+			return auth.ErrUserExists
+		}
 		return err
 	}
 	u.ID = uuidToString(row.ID)
