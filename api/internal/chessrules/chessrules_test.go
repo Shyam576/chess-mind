@@ -87,6 +87,37 @@ func TestApplyMove_SANIncludesCheck(t *testing.T) {
 	}
 }
 
+func TestApplyMove_ThreefoldRepetitionAutoClaim(t *testing.T) {
+	// Shuffle knights: Nf3 Nf6 Ng1 Ng8 Nf3 Nf6 Ng1 Ng8. The starting position
+	// is occurrence 1; it recurs after ply 4 (occurrence 2) and after ply 8
+	// (occurrence 3), so the draw must be claimed on exactly the 8th ply.
+	moves := [][3]string{
+		{"g1", "f3", ""}, {"g8", "f6", ""},
+		{"f3", "g1", ""}, {"f6", "g8", ""},
+		{"g1", "f3", ""}, {"g8", "f6", ""},
+		{"f3", "g1", ""}, {"f6", "g8", ""},
+	}
+	var prior []string
+	var last MoveResult
+	for i, m := range moves {
+		res, err := ApplyMove(prior, m[0], m[1], m[2])
+		if err != nil {
+			t.Fatalf("move %v failed: %v", m, err)
+		}
+		if i < len(moves)-1 && res.Status != StatusInProgress {
+			t.Fatalf("ply %d: Status = %q, want %q (draw claimed too early)", i+1, res.Status, StatusInProgress)
+		}
+		prior = append(prior, res.UCI)
+		last = res
+	}
+	if last.Status != StatusDrawRepetition {
+		t.Errorf("Status = %q, want %q", last.Status, StatusDrawRepetition)
+	}
+	if last.Result == nil || *last.Result != "1/2-1/2" {
+		t.Errorf("Result = %v, want \"1/2-1/2\"", last.Result)
+	}
+}
+
 func TestApplyMove_Castling(t *testing.T) {
 	prior := []string{}
 	setup := [][3]string{

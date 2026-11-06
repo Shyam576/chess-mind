@@ -66,6 +66,20 @@ func ApplyMove(priorMovesUCI []string, from, to, promotion string) (MoveResult, 
 		return MoveResult{}, ErrIllegalMove
 	}
 
+	// notnil/chess applies fivefold repetition and the 75-move rule
+	// automatically, but threefold repetition and the fifty-move rule are
+	// claim-only. Auto-claim them for a bot opponent — there's no one to
+	// decline a draw offer against. Only do this if the game hasn't already
+	// ended on its own (e.g. checkmate), since Draw() does not check that.
+	if game.Outcome() == chess.NoOutcome {
+		for _, method := range game.EligibleDraws() {
+			if method == chess.ThreefoldRepetition || method == chess.FiftyMoveRule {
+				_ = game.Draw(method)
+				break
+			}
+		}
+	}
+
 	// Encode SAN from the move as recorded in the game's history, not the
 	// bare decoded move — only the former carries the check (+) / mate (#)
 	// suffix, which notnil/chess computes during game.Move.
