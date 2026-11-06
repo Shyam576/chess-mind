@@ -2409,6 +2409,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -2475,6 +2476,7 @@ func handleServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, chessrules.ErrIllegalMove):
 		writeError(w, http.StatusBadRequest, "illegal_move", "that move is not legal in the current position")
 	default:
+		log.Printf("game handler: %v", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "an unexpected error occurred")
 	}
 }
