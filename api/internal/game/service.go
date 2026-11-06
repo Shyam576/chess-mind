@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,7 +35,7 @@ func (s *Service) CreateGame(ctx context.Context, userID string, color Color, di
 		return nil, err
 	}
 	if color == ColorBlack {
-		if _, _, err := s.playBotMove(ctx, g, nil); err != nil {
+		if _, err := s.playBotMove(ctx, g, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -116,12 +117,8 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, playerMove); err != nil {
-		return nil, nil, err
-	}
-
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, gameID, result.FEN, newStatus, result.Result); err != nil {
+	if err := s.repo.AppendMoveAndUpdateState(ctx, playerMove, result.FEN, newStatus, result.Result); err != nil {
 		return nil, nil, err
 	}
 	g.CurrentFEN = result.FEN
@@ -130,28 +127,31 @@ func (s *Service) SubmitMove(ctx context.Context, userID, gameID string, req Mov
 
 	newMoves := []*Move{playerMove}
 	if g.Status == StatusInProgress {
-		botMove, moves, err := s.playBotMove(ctx, g, append(prior, result.UCI))
+		botMove, err := s.playBotMove(ctx, g, append(prior, result.UCI))
 		if err != nil {
 			return nil, nil, err
 		}
 		if botMove != nil {
 			newMoves = append(newMoves, botMove)
 		}
-		_ = moves
 	}
 
 	return g, newMoves, nil
 }
 
-// playBotMove asks the engine for a move in the current position (priorUCI) and
-// applies it, mutating g in place and persisting the move and updated game state.
-// priorUCI is nil when the bot must play first (player chose black).
-func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, []string, error) {
+// playBotMove asks the engine for a move in the current position (priorUCI),
+// applies it, and atomically persists the move together with the resulting
+// game state. It mutates g in place to reflect the new state. priorUCI is nil
+// when the bot must play first (player chose black).
+func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (*Move, error) {
 	skillLevel := g.Difficulty
 	moveTime := 500 * time.Millisecond
 	best, err := s.engine.BestMove(ctx, priorUCI, skillLevel, moveTime)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
+	}
+	if len(best) < 4 {
+		return nil, fmt.Errorf("engine returned malformed move: %q", best)
 	}
 
 	from, to, promotion := best[0:2], best[2:4], ""
@@ -161,12 +161,12 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 
 	result, err := chessrules.ApplyMove(priorUCI, from, to, promotion)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	existing, err := s.repo.ListMoves(ctx, g.ID)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	botMove := &Move{
@@ -178,19 +178,16 @@ func (s *Service) playBotMove(ctx context.Context, g *Game, priorUCI []string) (
 		FENAfter:  result.FEN,
 		CreatedAt: time.Now(),
 	}
-	if err := s.repo.AppendMove(ctx, botMove); err != nil {
-		return nil, nil, err
-	}
 
 	newStatus := Status(result.Status)
-	if err := s.repo.UpdateGameState(ctx, g.ID, result.FEN, newStatus, result.Result); err != nil {
-		return nil, nil, err
+	if err := s.repo.AppendMoveAndUpdateState(ctx, botMove, result.FEN, newStatus, result.Result); err != nil {
+		return nil, err
 	}
 	g.CurrentFEN = result.FEN
 	g.Status = newStatus
 	g.Result = result.Result
 
-	return botMove, append(priorUCI, result.UCI), nil
+	return botMove, nil
 }
 
 func (s *Service) Resign(ctx context.Context, userID, gameID string) (*Game, error) {

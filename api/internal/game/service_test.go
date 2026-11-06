@@ -47,8 +47,12 @@ func (r *memRepo) ListMoves(ctx context.Context, gameID string) ([]*Move, error)
 	return r.moves[gameID], nil
 }
 
-func (r *memRepo) AppendMove(ctx context.Context, m *Move) error {
+func (r *memRepo) AppendMoveAndUpdateState(ctx context.Context, m *Move, fen string, status Status, result *string) error {
 	r.moves[m.GameID] = append(r.moves[m.GameID], m)
+	g := r.games[m.GameID]
+	g.CurrentFEN = fen
+	g.Status = status
+	g.Result = result
 	return nil
 }
 
@@ -94,7 +98,7 @@ func TestSubmitMove_WrongTurn(t *testing.T) {
 	// Simulate an out-of-band move (e.g. a concurrent request) so the
 	// recorded ply count says it is Black's turn, even though the
 	// registered player for this game is White.
-	require.NoError(t, repo.AppendMove(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}))
+	require.NoError(t, repo.AppendMoveAndUpdateState(ctx, &Move{GameID: g.ID, PlyNumber: 0, MoveSAN: "e4", MoveUCI: "e2e4", FENAfter: g.CurrentFEN}, g.CurrentFEN, StatusInProgress, nil))
 
 	_, _, err = svc.SubmitMove(ctx, "user-1", g.ID, MoveRequest{From: "d2", To: "d4"})
 	assert.ErrorIs(t, err, ErrNotYourTurn)
